@@ -1,3 +1,11 @@
+# GitHub Actions workflow template. To enable CI on this repo:
+#   1. mv this file to .github/workflows/ci.yml
+#   2. (one-time, if using gh CLI) `gh auth refresh -s workflow`
+#   3. git add .github/workflows/ci.yml && git commit && git push
+#
+# Lives outside .github/workflows/ here only because the initial push
+# happened with an OAuth token lacking the workflow scope.
+
 name: CI
 
 on:
