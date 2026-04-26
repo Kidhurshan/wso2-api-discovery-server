@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/wso2/api-discovery-server/internal/apim"
+	"github.com/wso2/api-discovery-server/internal/bff"
 	"github.com/wso2/api-discovery-server/internal/comparison"
 	"github.com/wso2/api-discovery-server/internal/config"
 	"github.com/wso2/api-discovery-server/internal/deepflow"
@@ -64,6 +65,7 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 	managedRepo := store.NewManagedRepo(pool)
 	classificationRepo := store.NewClassificationRepo(pool)
 	pipelineRepo := store.NewPipelineRepo(pool)
+	bffRepo := store.NewBFFRepo(pool)
 
 	// 4. DeepFlow client (optional — non-fatal at startup).
 	var dfClient deepflow.Client
@@ -122,6 +124,24 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 		healthErrCh <- healthSrv.Run(ctx)
 	}()
 
+	// 7b. Start the BFF (REST surface) — only if APIM auth is up so the
+	// introspection client has the credentials it needs to validate
+	// inbound bearer tokens.
+	bffLog := logging.WithComponent(log, "bff")
+	bffErrCh := make(chan error, 1)
+	if cfg.APIM.IntrospectURL == "" {
+		bffLog.Warn("bff disabled: apim.introspect_url not configured")
+		bffErrCh <- nil
+	} else {
+		introspector := apim.NewIntrospector(&cfg.APIM)
+		bffServer := bff.New(cfg, bffLog, bffRepo, introspector)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			bffErrCh <- bffServer.Run(ctx)
+		}()
+	}
+
 	// 8. DB-reachability poller.
 	wg.Add(1)
 	go func() {
@@ -152,6 +172,9 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 	}
 	if err := <-healthErrCh; err != nil {
 		return fmt.Errorf("health server: %w", err)
+	}
+	if err := <-bffErrCh; err != nil {
+		return fmt.Errorf("bff server: %w", err)
 	}
 	engineLog.Info("shutdown complete")
 	return nil
