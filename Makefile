@@ -30,8 +30,7 @@ run-local:
 	./bin/ads --config config/config.toml.example
 
 migrate-up:
-	psql $$ADS_DB_URL -f schema/001_init.sql
-	psql $$ADS_DB_URL -f schema/002_phase1_normalization_version.sql
-	psql $$ADS_DB_URL -f schema/003_managed_apis.sql
-	psql $$ADS_DB_URL -f schema/004_classifications.sql
-	psql $$ADS_DB_URL -f schema/005_view.sql
+	@for f in internal/store/migrations/*.sql; do \
+		echo ">>> applying $$f" ; \
+		psql $$ADS_DB_URL -f $$f || exit 1 ; \
+	done

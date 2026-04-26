@@ -1,0 +1,60 @@
+package store
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/wso2/api-discovery-server/internal/models"
+)
+
+// PipelineRepo reads and writes the single ads_pipeline_state row.
+//
+// Round 1 implements Get so health probes (Round 6) and the freshness guard
+// (Round 4) have a stable read path. Per-phase update methods are added in
+// the rounds that need them.
+type PipelineRepo struct {
+	pool *pgxpool.Pool
+}
+
+// NewPipelineRepo returns a PipelineRepo bound to pool.
+func NewPipelineRepo(pool *pgxpool.Pool) *PipelineRepo {
+	return &PipelineRepo{pool: pool}
+}
+
+// Get returns the seeded pipeline-state row. Phase 1 and Phase 2 timestamps
+// are zero until those rounds populate them.
+func (r *PipelineRepo) Get(ctx context.Context) (*models.PipelineState, error) {
+	const q = `
+        SELECT id::text,
+               COALESCE(phase1_last_success, 'epoch'),
+               COALESCE(phase1_last_window_start, 'epoch'),
+               COALESCE(phase1_last_window_end, 'epoch'),
+               COALESCE(phase2_last_success, 'epoch'),
+               COALESCE(phase3_last_success, 'epoch'),
+               COALESCE(phase3_last_view_refresh, 'epoch'),
+               COALESCE(last_retention_run, 'epoch'),
+               discovery_breaker_state,
+               managed_breaker_state
+          FROM ads_pipeline_state
+         LIMIT 1
+    `
+	var s models.PipelineState
+	err := r.pool.QueryRow(ctx, q).Scan(
+		&s.ID,
+		&s.Phase1LastSuccess,
+		&s.Phase1LastWindowStart,
+		&s.Phase1LastWindowEnd,
+		&s.Phase2LastSuccess,
+		&s.Phase3LastSuccess,
+		&s.Phase3LastViewRefresh,
+		&s.LastRetentionRun,
+		&s.DiscoveryBreakerState,
+		&s.ManagedBreakerState,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get pipeline state: %w", err)
+	}
+	return &s, nil
+}
