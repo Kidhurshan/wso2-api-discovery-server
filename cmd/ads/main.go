@@ -65,7 +65,7 @@ func main() {
 		cancel()
 	}()
 
-	if err := engine.Run(ctx, cfg); err != nil {
+	if err := engine.Run(ctx, cfg, *configPath); err != nil {
 		fmt.Fprintf(os.Stderr, "engine exited with error: %v\n", err)
 		os.Exit(1)
 	}

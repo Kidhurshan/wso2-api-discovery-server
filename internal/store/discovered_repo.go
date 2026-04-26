@@ -101,11 +101,25 @@ func (r *DiscoveredRepo) BatchUpsert(ctx context.Context, items []DiscoveredUpse
 
 	batch := &pgx.Batch{}
 	for _, x := range items {
+		// nil → empty for the array columns whose schema is NOT NULL
+		// DEFAULT '{}'. See managed_repo.go for the same fix.
+		raw := x.RawPathSamples
+		if raw == nil {
+			raw = []string{}
+		}
+		clients := x.DistinctClientsSample
+		if clients == nil {
+			clients = []string{}
+		}
+		statuses := x.StatusCodes
+		if statuses == nil {
+			statuses = []int16{}
+		}
 		batch.Queue(upsertSQL,
-			x.ServiceID, x.Method, x.NormalizedPath, x.RawPathSamples,
+			x.ServiceID, x.Method, x.NormalizedPath, raw,
 			x.FirstSeenAt, x.LastSeenAt,
 			x.ObservationCount, x.FlowCount, x.DistinctClientCount,
-			x.DistinctClientsSample, x.StatusCodes, x.AvgDurationUs,
+			clients, statuses, x.AvgDurationUs,
 			x.RequestDomain, x.InternalFlows, x.ExternalFlows,
 			x.SamplePod, x.SampleWorkload, x.NormalizationVersion, x.LastWindowID,
 		)

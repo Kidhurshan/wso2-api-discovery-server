@@ -24,6 +24,15 @@ func NewPipelineRepo(pool *pgxpool.Pool) *PipelineRepo {
 	return &PipelineRepo{pool: pool}
 }
 
+// UpdatePhase2Success records a successful Phase 2 cycle.
+func (r *PipelineRepo) UpdatePhase2Success(ctx context.Context) error {
+	const q = `UPDATE ads_pipeline_state SET phase2_last_success = now()`
+	if _, err := r.pool.Exec(ctx, q); err != nil {
+		return fmt.Errorf("update phase2 success: %w", err)
+	}
+	return nil
+}
+
 // UpdatePhase1Success records a successful Phase 1 cycle: bumps the
 // last-success timestamp and stores the just-queried window bounds.
 func (r *PipelineRepo) UpdatePhase1Success(ctx context.Context, windowStart, windowEnd time.Time) error {
