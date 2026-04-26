@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/wso2/api-discovery-server/internal/apim"
+	"github.com/wso2/api-discovery-server/internal/comparison"
 	"github.com/wso2/api-discovery-server/internal/config"
 	"github.com/wso2/api-discovery-server/internal/deepflow"
 	"github.com/wso2/api-discovery-server/internal/discovery"
@@ -61,6 +62,7 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 	serviceRepo := store.NewServiceRepo(pool)
 	discoveredRepo := store.NewDiscoveredRepo(pool)
 	managedRepo := store.NewManagedRepo(pool)
+	classificationRepo := store.NewClassificationRepo(pool)
 	pipelineRepo := store.NewPipelineRepo(pool)
 
 	// 4. DeepFlow client (optional — non-fatal at startup).
@@ -128,14 +130,15 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 	}()
 
 	// 9. Cycle loop.
+	comparisonLog := logging.WithComponent(log, "comparison")
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		runCycleLoop(ctx, cfg, log,
 			dfClient, sharedNormalizer,
 			publisher, resolver,
-			serviceRepo, discoveredRepo, managedRepo, pipelineRepo,
-			managedLog,
+			serviceRepo, discoveredRepo, managedRepo, classificationRepo, pipelineRepo,
+			managedLog, comparisonLog,
 		)
 	}()
 
@@ -154,13 +157,13 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 	return nil
 }
 
-// runCycleLoop drives both Phase 1 (every discovery.poll_interval_minutes)
-// and Phase 2 (every managed.poll_interval_minutes). Phase 3 is added in
-// Round 4.
+// runCycleLoop drives Phase 1, Phase 2, and Phase 3 on independent timers.
+// Per spec phase3_comparison.md §4, Phase 3 is meant to run "at the end of
+// every Phase 1 cycle, after both Phase 1 and Phase 2 have committed". We
+// implement that by running Phase 3 inline after each successful Phase 1.
 //
-// Cadence implementation: independent timers. Each tick fires its own
-// phase; if a phase's previous cycle is still running we skip to keep
-// cycles serial-per-phase (avoid double-write races).
+// Cadence implementation: per-phase mutex guards prevent overlapping cycles
+// of the same phase from racing on writes.
 func runCycleLoop(
 	ctx context.Context,
 	cfg *config.Config,
@@ -172,8 +175,10 @@ func runCycleLoop(
 	serviceRepo *store.ServiceRepo,
 	discoveredRepo *store.DiscoveredRepo,
 	managedRepo *store.ManagedRepo,
+	classificationRepo *store.ClassificationRepo,
 	pipelineRepo *store.PipelineRepo,
 	managedLog *zap.Logger,
+	comparisonLog *zap.Logger,
 ) {
 	cycleLog := logging.WithComponent(log, "cycle")
 
@@ -191,20 +196,43 @@ func runCycleLoop(
 		cycleLog.Info("phase 2 disabled (apim auth not initialized)")
 	}
 
+	// Phase 3 always runs (it's purely DB-side). Even when Phase 1 is
+	// disabled we want comparison to refresh — operators may have seeded
+	// ads_discovered_apis manually for testing.
+	phase3 := comparison.NewPipeline(cfg, comparisonLog, classificationRepo, pipelineRepo)
+
 	if phase1 == nil && phase2 == nil {
-		<-ctx.Done()
+		// Nothing to discover — don't spin tickers. But still allow Phase
+		// 3 to run on a slow ticker for housekeeping.
+		runPhase3Only(ctx, cycleLog, phase3, cfg)
 		return
 	}
 
 	p1Interval := time.Duration(cfg.Discovery.PollIntervalMinutes) * time.Minute
 	p2Interval := time.Duration(cfg.Managed.PollIntervalMinutes) * time.Minute
 
-	// First tick fires immediately for both timers; subsequent ticks at
-	// each phase's own interval. Use timer.Reset to keep this simple.
 	p1Timer := newImmediateTimer(phase1 != nil)
 	p2Timer := newImmediateTimer(phase2 != nil)
 
-	var p1Mu, p2Mu sync.Mutex // serialize cycles per-phase
+	var p1Mu, p2Mu, p3Mu sync.Mutex // serialize cycles per-phase
+
+	// runPhase3 is called after each successful Phase 1 cycle. The mutex
+	// guards against the rare case of overlapping invocations (only
+	// possible if the operator sets a very short Phase 1 interval).
+	runPhase3 := func(parent uuid.UUID) {
+		if !p3Mu.TryLock() {
+			cycleLog.Warn("phase 3 cycle skipped — previous still running")
+			return
+		}
+		defer p3Mu.Unlock()
+		cycleID := uuid.New()
+		if err := phase3.Run(ctx, cycleID); err != nil {
+			cycleLog.Error("phase 3 cycle failed",
+				zap.String("cycle_id", cycleID.String()),
+				zap.String("triggering_phase1_cycle", parent.String()),
+				zap.Error(err))
+		}
+	}
 
 	for {
 		select {
@@ -226,7 +254,11 @@ func runCycleLoop(
 				if err := phase1.Run(ctx, cycleID); err != nil {
 					cycleLog.Error("phase 1 cycle failed",
 						zap.String("cycle_id", cycleID.String()), zap.Error(err))
+					return
 				}
+				// Phase 3 piggy-backs on Phase 1's success — that's
+				// when fresh discovered_apis exist to classify.
+				runPhase3(cycleID)
 			}()
 			p1Timer.Reset(p1Interval)
 
@@ -248,6 +280,31 @@ func runCycleLoop(
 			}()
 			p2Timer.Reset(p2Interval)
 		}
+	}
+}
+
+// runPhase3Only is the fallback when Phase 1 + 2 are both disabled. Runs
+// Phase 3 every Phase 1 interval anyway so classification stays current
+// against any externally-seeded data.
+func runPhase3Only(ctx context.Context, log *zap.Logger, phase3 *comparison.Pipeline, cfg *config.Config) {
+	interval := time.Duration(cfg.Discovery.PollIntervalMinutes) * time.Minute
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		cycleID := uuid.New()
+		if err := phase3.Run(ctx, cycleID); err != nil {
+			log.Error("phase 3 cycle failed",
+				zap.String("cycle_id", cycleID.String()), zap.Error(err))
+		}
+		timer.Reset(interval)
 	}
 }
 

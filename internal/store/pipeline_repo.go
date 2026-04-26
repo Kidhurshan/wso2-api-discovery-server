@@ -24,6 +24,20 @@ func NewPipelineRepo(pool *pgxpool.Pool) *PipelineRepo {
 	return &PipelineRepo{pool: pool}
 }
 
+// UpdatePhase3Success records a successful Phase 3 cycle and the
+// just-completed materialized-view refresh time.
+func (r *PipelineRepo) UpdatePhase3Success(ctx context.Context) error {
+	const q = `
+        UPDATE ads_pipeline_state
+           SET phase3_last_success      = now(),
+               phase3_last_view_refresh = now()
+    `
+	if _, err := r.pool.Exec(ctx, q); err != nil {
+		return fmt.Errorf("update phase3 success: %w", err)
+	}
+	return nil
+}
+
 // UpdatePhase2Success records a successful Phase 2 cycle.
 func (r *PipelineRepo) UpdatePhase2Success(ctx context.Context) error {
 	const q = `UPDATE ads_pipeline_state SET phase2_last_success = now()`
