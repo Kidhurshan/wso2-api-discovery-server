@@ -61,33 +61,33 @@ version = "v1"
 
 [[discovery.normalization_rules]]
 name        = "uuid_v4"
-pattern     = '/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'
-placeholder = '/{id}'
-
-[[discovery.normalization_rules]]
-name        = "numeric_id"
-pattern     = '/[0-9]+\b'
-placeholder = '/{id}'
-
-[[discovery.normalization_rules]]
-name        = "mongo_objectid"
-pattern     = '/[0-9a-f]{24}\b'
-placeholder = '/{id}'
+pattern     = '/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(/|$)'
+placeholder = '/{id}$1'
 
 [[discovery.normalization_rules]]
 name        = "iso_date"
-pattern     = '/\d{4}-\d{2}-\d{2}\b'
-placeholder = '/{id}'
+pattern     = '/\d{4}-\d{2}-\d{2}(/|$)'
+placeholder = '/{id}$1'
 
 [[discovery.normalization_rules]]
-name        = "sku_pattern"
-pattern     = '/[A-Z]{3,}(-[A-Z0-9]+)+\b'
-placeholder = '/{id}'
+name        = "mongo_objectid"
+pattern     = '/[0-9a-f]{24}(/|$)'
+placeholder = '/{id}$1'
 
 [[discovery.normalization_rules]]
 name        = "customer_id"
-pattern     = '/CUST-[A-Z0-9]+\b'
-placeholder = '/{id}'
+pattern     = '/CUST-[A-Z0-9]+(/|$)'
+placeholder = '/{id}$1'
+
+[[discovery.normalization_rules]]
+name        = "sku_pattern"
+pattern     = '/[A-Z]{3,}(?:-[A-Z0-9]+)+(/|$)'
+placeholder = '/{id}$1'
+
+[[discovery.normalization_rules]]
+name        = "numeric_id"
+pattern     = '/[0-9]+(/|$)'
+placeholder = '/{id}$1'
 
 [managed]
 poll_interval_minutes  = 10

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -21,6 +22,21 @@ type PipelineRepo struct {
 // NewPipelineRepo returns a PipelineRepo bound to pool.
 func NewPipelineRepo(pool *pgxpool.Pool) *PipelineRepo {
 	return &PipelineRepo{pool: pool}
+}
+
+// UpdatePhase1Success records a successful Phase 1 cycle: bumps the
+// last-success timestamp and stores the just-queried window bounds.
+func (r *PipelineRepo) UpdatePhase1Success(ctx context.Context, windowStart, windowEnd time.Time) error {
+	const q = `
+        UPDATE ads_pipeline_state SET
+            phase1_last_success      = now(),
+            phase1_last_window_start = $1,
+            phase1_last_window_end   = $2
+    `
+	if _, err := r.pool.Exec(ctx, q, windowStart, windowEnd); err != nil {
+		return fmt.Errorf("update phase1 success: %w", err)
+	}
+	return nil
 }
 
 // Get returns the seeded pipeline-state row. Phase 1 and Phase 2 timestamps

@@ -60,40 +60,43 @@ version = "v1"
 
 # NOTE on regex syntax: Go's regexp package uses RE2, which does not support
 # Perl-style lookahead `(?=...)`. The spec's documented patterns use
-# `(?=/|$)` to match path-segment boundaries; the equivalent in RE2 is the
-# word boundary `\b` (a zero-width assertion between a word char and a
-# non-word char). All default rules ending in word chars (digits, hex,
-# uppercase letters) are functionally equivalent under either form.
+# `(?=/|$)` as a zero-width path-segment boundary. We emulate that by
+# capturing the boundary with `(/|$)` and putting it back in the
+# replacement via `$1` — semantically identical to lookahead.
+#
+# Rule ORDER MATTERS — longer-match patterns (uuid, iso date, customer-id,
+# SKU) come before numeric_id so they aren't pre-empted. e.g. `/2026-04-26`
+# would otherwise have `/2026` swallowed by numeric_id.
 
 [[discovery.normalization_rules]]
 name        = "uuid_v4"
-pattern     = '/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'
-placeholder = '/{id}'
-
-[[discovery.normalization_rules]]
-name        = "numeric_id"
-pattern     = '/[0-9]+\b'
-placeholder = '/{id}'
-
-[[discovery.normalization_rules]]
-name        = "mongo_objectid"
-pattern     = '/[0-9a-f]{24}\b'
-placeholder = '/{id}'
+pattern     = '/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(/|$)'
+placeholder = '/{id}$1'
 
 [[discovery.normalization_rules]]
 name        = "iso_date"
-pattern     = '/\d{4}-\d{2}-\d{2}\b'
-placeholder = '/{id}'
+pattern     = '/\d{4}-\d{2}-\d{2}(/|$)'
+placeholder = '/{id}$1'
 
 [[discovery.normalization_rules]]
-name        = "sku_pattern"
-pattern     = '/[A-Z]{3,}(-[A-Z0-9]+)+\b'
-placeholder = '/{id}'
+name        = "mongo_objectid"
+pattern     = '/[0-9a-f]{24}(/|$)'
+placeholder = '/{id}$1'
 
 [[discovery.normalization_rules]]
 name        = "customer_id"
-pattern     = '/CUST-[A-Z0-9]+\b'
-placeholder = '/{id}'
+pattern     = '/CUST-[A-Z0-9]+(/|$)'
+placeholder = '/{id}$1'
+
+[[discovery.normalization_rules]]
+name        = "sku_pattern"
+pattern     = '/[A-Z]{3,}(?:-[A-Z0-9]+)+(/|$)'
+placeholder = '/{id}$1'
+
+[[discovery.normalization_rules]]
+name        = "numeric_id"
+pattern     = '/[0-9]+(/|$)'
+placeholder = '/{id}$1'
 
 # Phase 2 — Managed API sync
 [managed]
