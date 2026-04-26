@@ -1,0 +1,29 @@
+# Build output
+bin/
+*.exe
+*.so
+
+# Local config (never push real configs with secrets)
+config/config.toml
+config/config.toml.local
+.env
+.env.local
+
+# Test output (keep test/results/ pushed; only local-prefixed scratch is excluded)
+test/results/local-*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Spec files — claude/ is local only.
+# CLAUDE.md sits at REPO ROOT and IS pushed (entry point for Claude Code).
+# claude/specs/*.md is NEVER pushed.
+claude/
+
+# Logs
+*.log
