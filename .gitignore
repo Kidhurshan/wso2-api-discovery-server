@@ -25,5 +25,8 @@ test/results/local-*
 # claude/specs/*.md is NEVER pushed.
 claude/
 
+# Claude Code working directory (settings, history) — never pushed.
+.claude/
+
 # Logs
 *.log
