@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ads
+  namespace: governance
+  labels:
+    app: ads
+spec:
+  # Multi-replica safe once leader election ships; for v1, scale to 1 if
+  # you don't want duplicate Phase 1 cycles.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ads
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: ads
+    spec:
+      serviceAccountName: ads
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: ads
+          image: ghcr.io/Kidhurshan/wso2-api-discovery-server:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8443
+              name: bff
+            - containerPort: 9090
+              name: health
+          env:
+            # POD_NAMESPACE + POD_NAME injected via downward API for the
+            # leader-election support (see operations_guide.md §3.2).
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Secrets — base64-encoded values from the secret.yaml manifest.
+            - name: ADS_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ads-secrets
+                  key: db_password
+            - name: APIM_SVC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ads-secrets
+                  key: apim_svc_password
+            - name: APIM_INTROSPECT_BASIC_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: ads-secrets
+                  key: apim_introspect_basic
+            - name: DEEPFLOW_CH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ads-secrets
+                  key: deepflow_ch_password
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          # Startup probe gives a 5-minute window for the DB connect retry
+          # and migrations to complete before liveness starts ticking.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            failureThreshold: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ads/config.toml
+              subPath: config.toml
+              readOnly: true
+            - name: dcr-creds
+              mountPath: /etc/ads
+              # Persistent volume so DCR creds survive pod restart and the
+              # daemon doesn't re-register on every restart.
+      volumes:
+        - name: config
+          configMap:
+            name: ads-config
+        - name: dcr-creds
+          emptyDir: {}

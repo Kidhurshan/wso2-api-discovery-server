@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/wso2/api-discovery-server/internal/config"
+	"github.com/wso2/api-discovery-server/internal/httputil"
 )
 
 // APISummary is the per-API entry in the /apis list endpoint. Only fields
@@ -213,7 +214,9 @@ func (c *PublisherClient) doGET(ctx context.Context, url string) ([]byte, error)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.http.Do(req)
+	// httputil.DoWithRetry handles transient 429/502/503/504 + transport
+	// errors with exponential backoff. GET is idempotent so this is safe.
+	resp, err := httputil.DoWithRetry(c.http, req)
 	if err != nil {
 		return nil, err
 	}

@@ -1,0 +1,6 @@
+# Dev override: faster cadence so changes show up quickly.
+replicaCount: 1
+discovery:
+  pollInterval: 1
+managed:
+  pollInterval: 1

@@ -1,0 +1,6 @@
+# Prod override placeholder. In real deployments, copy + populate the
+# secrets, topology, and image tag sections.
+
+replicaCount: 2
+image:
+  pullPolicy: Always

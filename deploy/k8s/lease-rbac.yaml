@@ -1,0 +1,28 @@
+# RBAC permitting the ads ServiceAccount to use Lease objects for the
+# leader-election that ships in a follow-up release. Applying this now
+# keeps cluster admins from needing a second pass when leader election
+# lands. Per claude/specs/operations_guide.md §3.2.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ads-lease
+  namespace: governance
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ads-lease
+  namespace: governance
+subjects:
+  - kind: ServiceAccount
+    name: ads
+    namespace: governance
+roleRef:
+  kind: Role
+  name: ads-lease
+  apiGroup: rbac.authorization.k8s.io

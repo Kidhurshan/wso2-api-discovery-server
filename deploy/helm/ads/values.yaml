@@ -1,0 +1,62 @@
+# Default values for the ads chart. Override with -f values-prod.yaml.
+
+image:
+  repository: ghcr.io/Kidhurshan/wso2-api-discovery-server
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+namespace: governance
+replicaCount: 2
+
+# Resource limits per pod. Match the spec's deployment.yaml defaults.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Database — typically a separate Postgres in the same cluster. The chart
+# does NOT manage Postgres; deploy it separately or use an operator.
+database:
+  host: postgres.governance.svc.cluster.local
+  port: 5432
+  name: ads
+  user: ads
+  sslmode: require
+
+# DeepFlow — reach via the deepflow-server NodePort (or ClusterIP if same
+# cluster). Spec deviation in project memory: use the querier API, not
+# direct ClickHouse.
+deepflow:
+  enabled: true
+  url: http://deepflow-server.deepflow.svc.cluster.local:20416
+  user: default
+
+# WSO2 APIM Publisher.
+apim:
+  publisherURL: https://apim.wso2.svc.cluster.local:9443
+  serviceAccountUsername: ads-service
+  introspectURL: https://apim.wso2.svc.cluster.local:9443/oauth2/introspect
+
+# Cycle cadence (minutes).
+discovery:
+  pollInterval: 5
+  windowMinutes: 5
+  skipInternal: true
+
+managed:
+  pollInterval: 10
+  fetchConcurrency: 5
+
+# Topology — operators MUST populate these for the deployment-aware
+# resolver to map APIM backend URLs to service identities.
+topology:
+  k8sNodes: []
+  legacyChosts: []
+
+# Retention.
+retention:
+  classificationsDays: 90
+  discoveredAPIsDays: 30

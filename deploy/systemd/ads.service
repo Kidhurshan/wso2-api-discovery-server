@@ -1,0 +1,46 @@
+# systemd unit for the ADS daemon. Per claude/specs/operations_guide.md
+# §9.2. Place at /etc/systemd/system/ads.service, then:
+#
+#   sudo useradd -r -s /usr/sbin/nologin ads
+#   sudo mkdir -p /var/log/ads /var/lib/ads /etc/ads
+#   sudo chown ads:ads /var/log/ads /var/lib/ads
+#   sudo cp config/config.toml.example /etc/ads/config.toml   # edit secrets
+#   sudo cp bin/ads /usr/local/bin/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now ads
+#
+# Secrets (DB password, APIM password) load from /etc/ads/secrets.env in
+# KEY=VALUE form. The file MUST be 0600 root:ads.
+
+[Unit]
+Description=WSO2 API Discovery Server
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ads
+Group=ads
+ExecStart=/usr/local/bin/ads --config /etc/ads/config.toml
+EnvironmentFile=-/etc/ads/secrets.env
+
+# Crash recovery — every 5s, with a burst limit so a permanent
+# config error doesn't restart-spin forever.
+Restart=always
+RestartSec=5
+StartLimitBurst=10
+StartLimitIntervalSec=600
+
+# Standard hardening (per spec §9.2). Adjust ReadWritePaths if you move
+# the log/state directories.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/log/ads /var/lib/ads
+
+[Install]
+WantedBy=multi-user.target

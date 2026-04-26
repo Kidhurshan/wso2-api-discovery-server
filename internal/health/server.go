@@ -14,26 +14,37 @@ import (
 	"go.uber.org/zap"
 )
 
-// State is the read-only snapshot the readiness probe consults. The engine
-// updates these fields as it runs; concurrent reads are guarded by the mutex
-// inside the implementation.
+// State is the read-only snapshot the readiness probe consults. Per
+// claude/specs/operations_guide.md §4.2 it covers DB reachability,
+// per-phase last-success timestamps, and per-breaker statuses.
 //
-// Round 1 ships a minimal version (DB reachable). Round 6 expands it to
-// include circuit breaker statuses and per-phase last-success timestamps.
+// Round 1 used a minimal stub; this is the full surface from Round 6.
 type State interface {
 	DBReachable() bool
+	BreakerStatuses() map[string]string
+	AnyBreakerOpen() bool
+	LastSuccess(phase string) time.Time
 }
 
-// staticState is the bootstrap implementation used in Round 1: always
-// reports the DB as reachable. The real implementation in internal/engine
-// will replace this in Round 6.
+// Phase identifiers used by the readiness payload. Strings live here too
+// so internal/engine doesn't need to import this package backwards.
+const (
+	phaseDiscovery  = "discovery"
+	phaseManaged    = "managed"
+	phaseComparison = "comparison"
+)
+
+// staticState is the bootstrap implementation: fixed DB-reachable flag,
+// no breakers, no phase tracking. Used by tests and by the engine in
+// case the full State isn't ready yet at startup.
 type staticState struct {
 	dbReachable bool
 	mu          sync.RWMutex
 }
 
-// NewStaticState returns a State whose DBReachable answer can be flipped at
-// runtime via SetDBReachable. Used as the engine's bootstrap state.
+// NewStaticState returns a State whose DBReachable answer can be flipped
+// at runtime via SetDBReachable. Used as a bootstrap when the rich
+// engine.State isn't ready yet (or in tests).
 func NewStaticState(initial bool) *staticState {
 	return &staticState{dbReachable: initial}
 }
@@ -51,8 +62,12 @@ func (s *staticState) SetDBReachable(v bool) {
 	s.mu.Unlock()
 }
 
-// Server runs the health HTTP server. Lifecycle is tied to the context passed
-// to Run.
+func (s *staticState) BreakerStatuses() map[string]string { return nil }
+func (s *staticState) AnyBreakerOpen() bool               { return false }
+func (s *staticState) LastSuccess(_ string) time.Time     { return time.Time{} }
+
+// Server runs the health HTTP server. Lifecycle is tied to the context
+// passed to Run.
 type Server struct {
 	addr  string
 	state State
@@ -106,18 +121,29 @@ func (s *Server) liveness(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}` + "\n"))
 }
 
-// readinessReport mirrors the future-richer struct in
-// claude/specs/operations_guide.md §4.2. Round 1 fills only db_reachable.
+// readinessReport mirrors the spec from operations_guide.md §4.2.
 type readinessReport struct {
-	Status            string `json:"status"`
-	DatabaseReachable bool   `json:"database_reachable"`
+	Status                string            `json:"status"`
+	DatabaseReachable     bool              `json:"database_reachable"`
+	CircuitBreakers       map[string]string `json:"circuit_breakers,omitempty"`
+	LastDiscoverySuccess  time.Time         `json:"last_discovery_success,omitempty"`
+	LastManagedSuccess    time.Time         `json:"last_managed_success,omitempty"`
+	LastComparisonSuccess time.Time         `json:"last_comparison_success,omitempty"`
 }
 
-// readiness returns 200 only when every dependency reported by State looks
-// healthy. Currently this means just the DB. Round 6 expands the criteria.
+// readiness returns 200 only when every dependency reported by State
+// looks healthy: DB reachable AND no breaker open. Per spec §4.2.
 func (s *Server) readiness(w http.ResponseWriter, _ *http.Request) {
-	report := readinessReport{DatabaseReachable: s.state.DBReachable()}
-	if report.DatabaseReachable {
+	report := readinessReport{
+		DatabaseReachable:     s.state.DBReachable(),
+		CircuitBreakers:       s.state.BreakerStatuses(),
+		LastDiscoverySuccess:  s.state.LastSuccess(phaseDiscovery),
+		LastManagedSuccess:    s.state.LastSuccess(phaseManaged),
+		LastComparisonSuccess: s.state.LastSuccess(phaseComparison),
+	}
+
+	ready := report.DatabaseReachable && !s.state.AnyBreakerOpen()
+	if ready {
 		report.Status = "ready"
 		w.WriteHeader(http.StatusOK)
 	} else {

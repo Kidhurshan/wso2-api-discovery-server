@@ -66,6 +66,16 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 	classificationRepo := store.NewClassificationRepo(pool)
 	pipelineRepo := store.NewPipelineRepo(pool)
 	bffRepo := store.NewBFFRepo(pool)
+	retentionRepo := store.NewRetentionRepo(pool)
+
+	// 3b. Build the rich engine state + per-phase circuit breakers, register
+	//     them so /readyz can report their status. Per spec
+	//     operations_guide.md §5.
+	state := NewState()
+	discoveryBreaker := NewCircuitBreaker(PhaseDiscovery)
+	managedBreaker := NewCircuitBreaker(PhaseManaged)
+	state.RegisterBreaker(discoveryBreaker)
+	state.RegisterBreaker(managedBreaker)
 
 	// 4. DeepFlow client (optional — non-fatal at startup).
 	var dfClient deepflow.Client
@@ -86,10 +96,7 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 		engineLog.Info("deepflow disabled in config; phase 1 will not run")
 	}
 
-	// 5. APIM auth + publisher client (Phase 2). Non-fatal at startup —
-	//    DCR/token failures are retried per cycle. The credsPath is the
-	//    config directory's sibling file, so deployments that share a
-	//    config dir reuse the same DCR registration.
+	// 5. APIM auth + publisher client. Non-fatal at startup.
 	var auth *apim.Auth
 	var publisher *apim.PublisherClient
 	apimLog := logging.WithComponent(log, "apim")
@@ -111,8 +118,7 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 	resolver := managed.NewResolver(topology, dns)
 	sharedNormalizer := discovery.NewFromConfig(&cfg.Discovery)
 
-	// 7. Boot the health-check state and start the health server.
-	state := health.NewStaticState(true)
+	// 7. Boot the health server with the rich State.
 	healthLog := logging.WithComponent(log, "health")
 	healthSrv := health.New(cfg.Health.ListenAddr, state, healthLog)
 
@@ -124,9 +130,7 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 		healthErrCh <- healthSrv.Run(ctx)
 	}()
 
-	// 7b. Start the BFF (REST surface) — only if APIM auth is up so the
-	// introspection client has the credentials it needs to validate
-	// inbound bearer tokens.
+	// 7b. Start the BFF (REST surface).
 	bffLog := logging.WithComponent(log, "bff")
 	bffErrCh := make(chan error, 1)
 	if cfg.APIM.IntrospectURL == "" {
@@ -149,12 +153,22 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 		pollDBReachability(ctx, pool, state, dbLog)
 	}()
 
+	// 8b. Retention job (daily 02:00 local). Non-fatal — failures log a
+	//     warning but don't stop the daemon. Per spec operations_guide.md §8.
+	retentionLog := logging.WithComponent(log, "retention")
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runRetentionLoop(ctx, retentionLog, retentionRepo, &cfg.Retention)
+	}()
+
 	// 9. Cycle loop.
 	comparisonLog := logging.WithComponent(log, "comparison")
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runCycleLoop(ctx, cfg, log,
+		runCycleLoop(ctx, cfg, log, state,
+			discoveryBreaker, managedBreaker,
 			dfClient, sharedNormalizer,
 			publisher, resolver,
 			serviceRepo, discoveredRepo, managedRepo, classificationRepo, pipelineRepo,
@@ -180,17 +194,14 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 	return nil
 }
 
-// runCycleLoop drives Phase 1, Phase 2, and Phase 3 on independent timers.
-// Per spec phase3_comparison.md §4, Phase 3 is meant to run "at the end of
-// every Phase 1 cycle, after both Phase 1 and Phase 2 have committed". We
-// implement that by running Phase 3 inline after each successful Phase 1.
-//
-// Cadence implementation: per-phase mutex guards prevent overlapping cycles
-// of the same phase from racing on writes.
+// runCycleLoop drives Phase 1, Phase 2, and Phase 3 on independent timers,
+// gating each by its circuit breaker and recording success/failure.
 func runCycleLoop(
 	ctx context.Context,
 	cfg *config.Config,
 	log *zap.Logger,
+	state *State,
+	discoveryBreaker, managedBreaker *CircuitBreaker,
 	df deepflow.Client,
 	norm *discovery.Normalizer,
 	publisher *apim.PublisherClient,
@@ -219,15 +230,10 @@ func runCycleLoop(
 		cycleLog.Info("phase 2 disabled (apim auth not initialized)")
 	}
 
-	// Phase 3 always runs (it's purely DB-side). Even when Phase 1 is
-	// disabled we want comparison to refresh — operators may have seeded
-	// ads_discovered_apis manually for testing.
 	phase3 := comparison.NewPipeline(cfg, comparisonLog, classificationRepo, pipelineRepo)
 
 	if phase1 == nil && phase2 == nil {
-		// Nothing to discover — don't spin tickers. But still allow Phase
-		// 3 to run on a slow ticker for housekeeping.
-		runPhase3Only(ctx, cycleLog, phase3, cfg)
+		runPhase3Only(ctx, cycleLog, phase3, state, cfg)
 		return
 	}
 
@@ -237,11 +243,8 @@ func runCycleLoop(
 	p1Timer := newImmediateTimer(phase1 != nil)
 	p2Timer := newImmediateTimer(phase2 != nil)
 
-	var p1Mu, p2Mu, p3Mu sync.Mutex // serialize cycles per-phase
+	var p1Mu, p2Mu, p3Mu sync.Mutex
 
-	// runPhase3 is called after each successful Phase 1 cycle. The mutex
-	// guards against the rare case of overlapping invocations (only
-	// possible if the operator sets a very short Phase 1 interval).
 	runPhase3 := func(parent uuid.UUID) {
 		if !p3Mu.TryLock() {
 			cycleLog.Warn("phase 3 cycle skipped — previous still running")
@@ -254,7 +257,9 @@ func runCycleLoop(
 				zap.String("cycle_id", cycleID.String()),
 				zap.String("triggering_phase1_cycle", parent.String()),
 				zap.Error(err))
+			return
 		}
+		state.MarkPhaseSuccess(PhaseComparison)
 	}
 
 	for {
@@ -273,14 +278,21 @@ func runCycleLoop(
 					return
 				}
 				defer p1Mu.Unlock()
+
+				if !discoveryBreaker.Allow() {
+					cycleLog.Warn("phase 1 skipped — circuit breaker open",
+						zap.String("breaker", discoveryBreaker.Name()))
+					return
+				}
 				cycleID := uuid.New()
 				if err := phase1.Run(ctx, cycleID); err != nil {
 					cycleLog.Error("phase 1 cycle failed",
 						zap.String("cycle_id", cycleID.String()), zap.Error(err))
+					discoveryBreaker.RecordFailure()
 					return
 				}
-				// Phase 3 piggy-backs on Phase 1's success — that's
-				// when fresh discovered_apis exist to classify.
+				discoveryBreaker.RecordSuccess()
+				state.MarkPhaseSuccess(PhaseDiscovery)
 				runPhase3(cycleID)
 			}()
 			p1Timer.Reset(p1Interval)
@@ -295,21 +307,29 @@ func runCycleLoop(
 					return
 				}
 				defer p2Mu.Unlock()
+
+				if !managedBreaker.Allow() {
+					cycleLog.Warn("phase 2 skipped — circuit breaker open",
+						zap.String("breaker", managedBreaker.Name()))
+					return
+				}
 				cycleID := uuid.New()
 				if err := phase2.Run(ctx, cycleID); err != nil {
 					cycleLog.Error("phase 2 cycle failed",
 						zap.String("cycle_id", cycleID.String()), zap.Error(err))
+					managedBreaker.RecordFailure()
+					return
 				}
+				managedBreaker.RecordSuccess()
+				state.MarkPhaseSuccess(PhaseManaged)
 			}()
 			p2Timer.Reset(p2Interval)
 		}
 	}
 }
 
-// runPhase3Only is the fallback when Phase 1 + 2 are both disabled. Runs
-// Phase 3 every Phase 1 interval anyway so classification stays current
-// against any externally-seeded data.
-func runPhase3Only(ctx context.Context, log *zap.Logger, phase3 *comparison.Pipeline, cfg *config.Config) {
+// runPhase3Only is the fallback when Phase 1 + 2 are both disabled.
+func runPhase3Only(ctx context.Context, log *zap.Logger, phase3 *comparison.Pipeline, state *State, cfg *config.Config) {
 	interval := time.Duration(cfg.Discovery.PollIntervalMinutes) * time.Minute
 	if interval <= 0 {
 		interval = 5 * time.Minute
@@ -326,9 +346,40 @@ func runPhase3Only(ctx context.Context, log *zap.Logger, phase3 *comparison.Pipe
 		if err := phase3.Run(ctx, cycleID); err != nil {
 			log.Error("phase 3 cycle failed",
 				zap.String("cycle_id", cycleID.String()), zap.Error(err))
+		} else {
+			state.MarkPhaseSuccess(PhaseComparison)
 		}
 		timer.Reset(interval)
 	}
+}
+
+// runRetentionLoop runs the retention SQL daily at 02:00 local time. The
+// first run fires at the next 02:00 boundary, then every 24h thereafter.
+// Failures log a warning but never stop the daemon.
+func runRetentionLoop(ctx context.Context, log *zap.Logger, repo *store.RetentionRepo, cfg *config.RetentionConfig) {
+	for {
+		next := nextRetentionFire(time.Now())
+		log.Info("retention scheduled", zap.Time("next_run", next))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Until(next)):
+		}
+		if err := repo.RunRetention(ctx, cfg); err != nil {
+			log.Warn("retention pass failed", zap.Error(err))
+		} else {
+			log.Info("retention pass complete")
+		}
+	}
+}
+
+// nextRetentionFire returns the next 02:00 in the local timezone after now.
+func nextRetentionFire(now time.Time) time.Time {
+	next := time.Date(now.Year(), now.Month(), now.Day(), 2, 0, 0, 0, now.Location())
+	if !next.After(now) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
 }
 
 // newImmediateTimer returns a timer set to fire immediately. enabled=false
@@ -340,8 +391,7 @@ func newImmediateTimer(enabled bool) *time.Timer {
 	return time.NewTimer(0)
 }
 
-// tick returns the timer's channel, or a nil channel if t is nil — a select
-// branch on a nil channel is forever-blocking, which is what we want.
+// tick returns the timer's channel, or a nil channel if t is nil.
 func tick(t *time.Timer) <-chan time.Time {
 	if t == nil {
 		return nil
@@ -350,9 +400,7 @@ func tick(t *time.Timer) <-chan time.Time {
 }
 
 // pollDBReachability pings the pool every 10s and updates state.
-func pollDBReachability(ctx context.Context, pool *pgxpool.Pool, state interface {
-	SetDBReachable(bool)
-}, log *zap.Logger) {
+func pollDBReachability(ctx context.Context, pool *pgxpool.Pool, state *State, log *zap.Logger) {
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 	for {
