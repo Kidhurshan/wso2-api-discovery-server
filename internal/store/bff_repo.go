@@ -332,15 +332,21 @@ func (r *BFFRepo) GetDiscoveredByID(ctx context.Context, id uuid.UUID) (*Detail,
 		}
 	}
 
-	// Sister-set: APIM-managed APIs on the SAME service_identity. Used by
-	// the UI for the "Why this is a finding" panel on drift/managed.
+	// Sister-set: APIM-managed APIs sharing this discovered path's APIM
+	// context prefix. Post-redesign the managed table no longer carries
+	// service_identity, so we match the discovered path's normalized form
+	// against the managed apim_api_context (e.g. "/customers/1.0.0"):
+	// any managed API whose context is a prefix of the discovered path
+	// is part of the same APIM API "family" the operator can compare to.
 	const sisterQ = `
         SELECT DISTINCT apim_api_id, apim_api_name, apim_api_version
           FROM ads_managed_apis
-         WHERE service_identity = $1 AND is_active = true
+         WHERE is_active = true
+           AND ($1 = apim_api_context
+                OR $1 LIKE apim_api_context || '/%')
          ORDER BY apim_api_name
     `
-	rows, err := r.pool.Query(ctx, sisterQ, d.ServiceIdentity)
+	rows, err := r.pool.Query(ctx, sisterQ, d.NormalizedPath)
 	if err != nil {
 		return nil, fmt.Errorf("service managed apis: %w", err)
 	}
@@ -406,20 +412,22 @@ type UntraffickedItem struct {
 }
 
 // ListUntrafficked returns active managed operations with no matching
-// discovered row. Implements spec phase3_comparison.md §8.
+// discovered row. Post-redesign the match key is (method, path) only —
+// the managed table no longer stores service_identity. The reported
+// "service" identity is derived from the APIM API context, which is the
+// most stable identity we still have on the managed side.
 func (r *BFFRepo) ListUntrafficked(ctx context.Context) ([]UntraffickedItem, error) {
 	const q = `
         SELECT m.apim_api_id, m.apim_api_name, m.apim_api_version,
-               m.method, m.gateway_path, m.service_identity, m.last_synced_at
+               m.method, m.gateway_path, m.apim_api_context, m.last_synced_at
           FROM ads_managed_apis m
          WHERE m.is_active = true
            AND NOT EXISTS (
                SELECT 1 FROM ads_discovered_apis d
-                 JOIN ads_services s ON s.id = d.service_id
-                WHERE d.method            = m.method
-                  AND d.normalized_path   = m.gateway_path
-                  AND s.service_identity  = m.service_identity
-                  AND d.is_active         = true
+                WHERE d.method          = m.method
+                  AND d.is_active       = true
+                  AND (d.normalized_path = m.gateway_path
+                       OR d.normalized_path = m.backend_path)
            )
          ORDER BY m.apim_api_name, m.gateway_path
     `
