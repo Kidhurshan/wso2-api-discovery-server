@@ -20,10 +20,9 @@ test/results/local-*
 # OS
 .DS_Store
 
-# Spec files — claude/ is local only.
-# CLAUDE.md sits at REPO ROOT and IS pushed (entry point for Claude Code).
-# claude/specs/*.md is NEVER pushed.
+# Spec files and Claude Code entry point — local only, never pushed.
 claude/
+CLAUDE.md
 
 # Claude Code working directory (settings, history) — never pushed.
 .claude/
