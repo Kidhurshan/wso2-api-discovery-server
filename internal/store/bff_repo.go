@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/wso2/api-discovery-server/internal/models"
 )
 
 // BFFRepo serves the read paths backing the daemon's REST endpoints.
@@ -276,6 +279,10 @@ type Detail struct {
 	MatchedAPIMAPIIDs     []string       `json:"matched_apim_api_ids"`
 	MatchedAPIMAPIs       []DetailAPIRef `json:"matched_apim_apis"`
 	ServiceManagedAPIs    []DetailAPIRef `json:"service_managed_apis"`
+
+	// TopClients is the per-cycle top callers for this finding,
+	// pre-sorted by Observations desc and capped at 20.
+	TopClients []models.ClientObservation `json:"top_clients"`
 }
 
 // DetailAPIRef is the trimmed APIM-API reference embedded in Detail.
@@ -297,12 +304,14 @@ func (r *BFFRepo) GetDiscoveredByID(ctx context.Context, id uuid.UUID) (*Detail,
                observation_count, distinct_client_count, distinct_clients_sample,
                status_codes, avg_duration_us,
                sample_pod, sample_workload,
-               matched_apim_api_ids
+               matched_apim_api_ids,
+               top_clients
           FROM v_current_classifications
          WHERE discovered_api_id = $1
     `
 	var d Detail
 	var statusCodes []int16
+	var topClientsJSON []byte
 	err := r.pool.QueryRow(ctx, q, id).Scan(
 		&d.ID, &d.ServiceIdentity, &d.EnvKind,
 		&d.Method, &d.NormalizedPath, &d.RawPathSamples,
@@ -312,6 +321,7 @@ func (r *BFFRepo) GetDiscoveredByID(ctx context.Context, id uuid.UUID) (*Detail,
 		&statusCodes, &d.AvgDurationUs,
 		&d.SamplePod, &d.SampleWorkload,
 		&d.MatchedAPIMAPIIDs,
+		&topClientsJSON,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -321,6 +331,14 @@ func (r *BFFRepo) GetDiscoveredByID(ctx context.Context, id uuid.UUID) (*Detail,
 	}
 	for _, s := range statusCodes {
 		d.StatusCodes = append(d.StatusCodes, int(s))
+	}
+	if len(topClientsJSON) > 0 {
+		if err := json.Unmarshal(topClientsJSON, &d.TopClients); err != nil {
+			return nil, fmt.Errorf("unmarshal top_clients: %w", err)
+		}
+	}
+	if d.TopClients == nil {
+		d.TopClients = []models.ClientObservation{}
 	}
 
 	// Derive namespace + service from k8s:<ns>/<svc> identity.

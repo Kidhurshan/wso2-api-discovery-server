@@ -6,6 +6,19 @@ import (
 	"github.com/google/uuid"
 )
 
+// ClientObservation is one entry in the per-finding top_clients list,
+// stored as JSONB on ads_discovered_apis. Recomputed each Phase 1 cycle;
+// the merger sorts by Observations desc and caps at top 20.
+type ClientObservation struct {
+	Identity     string `json:"identity"`            // "k8s:<ns>/<workload>" | "host:<ip>"
+	Kind         string `json:"kind"`                // "k8s" | "legacy"
+	Namespace    string `json:"namespace,omitempty"` // K8s only
+	Workload     string `json:"workload,omitempty"`  // K8s only
+	IP           string `json:"ip"`                  // sample IP (always populated)
+	Port         int    `json:"port,omitempty"`      // sample source port; rotates per connection
+	Observations int64  `json:"observations"`
+}
+
 // DiscoveredAPI is one row in ads_discovered_apis. Maps the upsert in
 // claude/specs/phase1_discovery.md §5.2.
 type DiscoveredAPI struct {

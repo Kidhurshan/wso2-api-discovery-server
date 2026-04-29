@@ -205,6 +205,7 @@ func (p *Pipeline) Run(ctx context.Context, cycleID uuid.UUID) error {
 			SampleWorkload:        m.SampleWorkload,
 			NormalizationVersion:  m.NormalizationVersion,
 			LastWindowID:          m.LastWindowID,
+			TopClients:            m.TopClients,
 		})
 	}
 

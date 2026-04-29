@@ -2,12 +2,15 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/wso2/api-discovery-server/internal/models"
 )
 
 // DiscoveredRepo handles ads_discovered_apis CRUD.
@@ -42,6 +45,7 @@ type DiscoveredUpsert struct {
 	SampleWorkload        string
 	NormalizationVersion  string
 	LastWindowID          uuid.UUID
+	TopClients            []models.ClientObservation
 }
 
 // upsertSQL is the spec's history-preserving upsert (LEAST/GREATEST/SUM)
@@ -55,14 +59,16 @@ INSERT INTO ads_discovered_apis (
     observation_count, flow_count, distinct_client_count,
     distinct_clients_sample, status_codes, avg_duration_us,
     request_domain, internal_flows, external_flows,
-    sample_pod, sample_workload, normalization_version, last_window_id
+    sample_pod, sample_workload, normalization_version, last_window_id,
+    top_clients
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6,
     $7, $8, $9,
     $10, $11, $12,
     $13, $14, $15,
-    $16, $17, $18, $19
+    $16, $17, $18, $19,
+    $20::jsonb
 )
 ON CONFLICT (service_id, method, normalized_path) DO UPDATE SET
     last_seen_at        = GREATEST(ads_discovered_apis.last_seen_at, EXCLUDED.last_seen_at),
@@ -88,6 +94,9 @@ ON CONFLICT (service_id, method, normalized_path) DO UPDATE SET
     request_domain      = COALESCE(NULLIF(EXCLUDED.request_domain, ''), ads_discovered_apis.request_domain),
     last_window_id      = EXCLUDED.last_window_id,
     normalization_version = EXCLUDED.normalization_version,
+    -- top_clients: replace with the latest cycle's snapshot (it's a
+    -- per-window top-N, not a cumulative set).
+    top_clients         = EXCLUDED.top_clients,
     is_active           = true,
     updated_at          = now()
 `
@@ -115,6 +124,15 @@ func (r *DiscoveredRepo) BatchUpsert(ctx context.Context, items []DiscoveredUpse
 		if statuses == nil {
 			statuses = []int16{}
 		}
+		topClients := x.TopClients
+		if topClients == nil {
+			topClients = []models.ClientObservation{}
+		}
+		topClientsJSON, err := json.Marshal(topClients)
+		if err != nil {
+			return fmt.Errorf("marshal top_clients for %s %s: %w",
+				x.Method, x.NormalizedPath, err)
+		}
 		batch.Queue(upsertSQL,
 			x.ServiceID, x.Method, x.NormalizedPath, raw,
 			x.FirstSeenAt, x.LastSeenAt,
@@ -122,6 +140,7 @@ func (r *DiscoveredRepo) BatchUpsert(ctx context.Context, items []DiscoveredUpse
 			clients, statuses, x.AvgDurationUs,
 			x.RequestDomain, x.InternalFlows, x.ExternalFlows,
 			x.SamplePod, x.SampleWorkload, x.NormalizationVersion, x.LastWindowID,
+			topClientsJSON,
 		)
 	}
 

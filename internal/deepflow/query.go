@@ -53,6 +53,7 @@ func BuildPerFlowSQL(p PerFlowQuery) string {
     observation_point,
     server_port,
     agent_id,
+    ip4_0 AS client_ip,
     Count(row) AS row_count,
     any(request_resource) AS sample_url,
     any(request_domain) AS request_domain,
@@ -64,7 +65,10 @@ func BuildPerFlowSQL(p PerFlowQuery) string {
     any(ip4_1) AS server_ip,
     any(auto_instance_type_1) AS instance_type_server,
     any(auto_instance_type_0) AS instance_type_client,
-    any(ip4_0) AS client_ip,
+    any(pod_ns_0) AS client_namespace,
+    any(pod_group_0) AS client_workload,
+    any(pod_0) AS client_pod,
+    any(client_port) AS client_port_sample,
     toUnixTimestamp(Min(start_time)) AS first_seen_unix,
     toUnixTimestamp(Max(end_time)) AS last_seen_unix,
     Avg(response_duration) AS avg_duration_us
@@ -93,7 +97,7 @@ WHERE protocol = 6
 		fmt.Fprintf(&b, "  AND server_port NOT IN (%s)\n", joinInts(p.NoisePorts))
 	}
 
-	b.WriteString(`GROUP BY request_type, endpoint, observation_point, server_port, agent_id
+	b.WriteString(`GROUP BY request_type, endpoint, observation_point, server_port, agent_id, ip4_0
 `)
 
 	// Cap result size as the last clause so the rest of the WHERE clause

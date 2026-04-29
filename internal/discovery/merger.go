@@ -42,7 +42,16 @@ type MergedRow struct {
 
 	InternalFlows int64 // folded rowcount where direction == internal
 	ExternalFlows int64 // folded rowcount where direction == external
+
+	// TopClients is the per-cycle top-N callers ranked by Observations
+	// desc. Capped at clientsCap entries before persisting.
+	TopClients []models.ClientObservation
 }
+
+// clientsCap bounds the size of TopClients per row, controlling the
+// JSONB column footprint. 20 fits comfortably under 2KB even with K8s
+// workloads + namespaces and IP/port samples.
+const clientsCap = 20
 
 // MergeAndNormalize pipelines normalization + merging in one pass. For each
 // classified signal:
@@ -58,6 +67,10 @@ func MergeAndNormalize(
 	cycleID uuid.UUID,
 ) []MergedRow {
 	bucket := make(map[MergeKey]*MergedRow, len(signals))
+	// Per-bucket map of client identity → folding ClientObservation.
+	// We build it during merge, then resolve to a sorted+capped slice
+	// at the end before returning.
+	clientsByBucket := make(map[MergeKey]map[string]*models.ClientObservation, len(signals))
 
 	for _, s := range signals {
 		key := MergeKey{
@@ -131,6 +144,53 @@ func MergeAndNormalize(
 		if (existing.SampleWorkload == "" || s.ObservationPoint == tapServerSideProcess) && s.K8sWorkload != "" {
 			existing.SampleWorkload = s.K8sWorkload
 		}
+
+		// Roll up top callers. Skip if classifier couldn't tag the
+		// client (anonymous internet traffic, missing tags, etc.) —
+		// those callers aren't actionable for triage.
+		if s.ClientIdentity != "" {
+			clients, ok := clientsByBucket[key]
+			if !ok {
+				clients = make(map[string]*models.ClientObservation)
+				clientsByBucket[key] = clients
+			}
+			obs, seen := clients[s.ClientIdentity]
+			if !seen {
+				obs = &models.ClientObservation{
+					Identity:  s.ClientIdentity,
+					Kind:      s.ClientKind,
+					Namespace: s.ClientNamespace,
+					Workload:  s.ClientWorkload,
+					IP:        s.ClientIP,
+					Port:      s.ClientPortSample,
+				}
+				clients[s.ClientIdentity] = obs
+			}
+			obs.Observations += s.RowCount
+			// Sample port only if not yet captured — first wins.
+			if obs.Port == 0 && s.ClientPortSample > 0 {
+				obs.Port = s.ClientPortSample
+			}
+		}
+	}
+
+	// Resolve per-bucket top_clients to sorted+capped slices.
+	for key, clients := range clientsByBucket {
+		row := bucket[key]
+		list := make([]models.ClientObservation, 0, len(clients))
+		for _, c := range clients {
+			list = append(list, *c)
+		}
+		sort.Slice(list, func(i, j int) bool {
+			if list[i].Observations != list[j].Observations {
+				return list[i].Observations > list[j].Observations
+			}
+			return list[i].Identity < list[j].Identity
+		})
+		if len(list) > clientsCap {
+			list = list[:clientsCap]
+		}
+		row.TopClients = list
 	}
 
 	out := make([]MergedRow, 0, len(bucket))

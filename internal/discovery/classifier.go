@@ -46,6 +46,10 @@ type rawSignal struct {
 	InstanceTypeS    int
 	InstanceTypeC    int
 	ClientIP         string
+	ClientNamespace  string
+	ClientWorkload   string
+	ClientPod        string
+	ClientPortSample int
 	FirstSeenUnix    int64
 	LastSeenUnix     int64
 	AvgDurationUs    float64
@@ -71,6 +75,10 @@ func fromRow(r deepflow.Row) rawSignal {
 		InstanceTypeS:    r.Int("instance_type_server"),
 		InstanceTypeC:    r.Int("instance_type_client"),
 		ClientIP:         r.String("client_ip"),
+		ClientNamespace:  r.String("client_namespace"),
+		ClientWorkload:   r.String("client_workload"),
+		ClientPod:        r.String("client_pod"),
+		ClientPortSample: r.Int("client_port_sample"),
 		FirstSeenUnix:    r.Int64("first_seen_unix"),
 		LastSeenUnix:     r.Int64("last_seen_unix"),
 		AvgDurationUs:    r.Float64("avg_duration_us"),
@@ -85,6 +93,12 @@ type classified struct {
 	EnvKind          string // "k8s" | "legacy" | "skip"
 	ServiceIdentity  string // "k8s:<ns>/<svc>" | "host:<ip>:<port>" | ""
 	TrafficDirection string // "internal" | "external"
+
+	// Client-side derivations (mirror the service-side classification but
+	// applied to the source/peer the request came from). Used to roll up
+	// "top callers" per finding for the BFF detail page.
+	ClientKind     string // "k8s" | "legacy" | "" (unknown — internet/255)
+	ClientIdentity string // "k8s:<ns>/<workload>" | "host:<ip>" | ""
 }
 
 // classify applies the spec's truth tables to a single raw signal.
@@ -123,7 +137,35 @@ func classify(r rawSignal) classified {
 	}
 
 	c.TrafficDirection = directionFor(r)
+	classifyClient(&c)
 	return c
+}
+
+// classifyClient sets ClientKind / ClientIdentity using the source-side
+// auto-tags. Triage value drops sharply if we can't show *something* per
+// caller, so the fallback rule is intentionally permissive:
+//
+//	K8s client    → instance_type_0 in {pod, node-or-NIC} AND
+//	                pod_ns_0/pod_group_0 set
+//	Legacy client → instance_type_0 == chost AND ip4_0 set
+//	Generic host  → any other non-empty ip4_0 (covers hosts DeepFlow
+//	                tags as "internet/unknown" because they're not in
+//	                its instance registry — common for VMs outside the
+//	                cluster's tracked domain)
+//	Skip          → only when ip4_0 is empty (truly anonymous flow)
+func classifyClient(c *classified) {
+	switch {
+	case (c.InstanceTypeC == instanceTypeK8sPod || c.InstanceTypeC == instanceTypeK8sNodeOrNIC) &&
+		c.ClientNamespace != "" && c.ClientWorkload != "":
+		c.ClientKind = "k8s"
+		c.ClientIdentity = "k8s:" + c.ClientNamespace + "/" + c.ClientWorkload
+	case c.InstanceTypeC == instanceTypeChost && c.ClientIP != "":
+		c.ClientKind = "legacy"
+		c.ClientIdentity = "host:" + c.ClientIP
+	case c.ClientIP != "":
+		c.ClientKind = "legacy"
+		c.ClientIdentity = "host:" + c.ClientIP
+	}
 }
 
 // directionFor implements the spec §3.3 direction precedence.
