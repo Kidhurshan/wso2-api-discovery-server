@@ -1,0 +1,57 @@
+{{/*
+TLS certificate for the BFF endpoint.
+
+Three modes:
+
+  tls.existingSecret = "<name>"  → operator-supplied Secret (e.g. one
+                                   produced by cert-manager). The
+                                   chart references it directly; nothing
+                                   is generated.
+
+  tls.autoGenerate   = true (default) AND existingSecret = ""
+                                 → Helm renders a self-signed cert at
+                                   install time via genSelfSignedCert,
+                                   stored as a kubernetes.io/tls Secret
+                                   named <release>-ads-tls. Persists
+                                   across helm upgrades because of the
+                                   "lookup" guard below — only generated
+                                   on first install.
+
+  tls.autoGenerate   = false   → no Secret rendered. Operator must
+                                   create one named <release>-ads-tls
+                                   externally, or set existingSecret.
+*/}}
+
+{{- if and .Values.tls.autoGenerate (not .Values.tls.existingSecret) -}}
+{{- $secretName := printf "%s-ads-tls" .Release.Name -}}
+{{- $existing := lookup "v1" "Secret" .Values.namespace $secretName -}}
+{{- if $existing -}}
+# Existing cert preserved on upgrade — skip regeneration.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "ads.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ index $existing.data "tls.crt" }}
+  tls.key: {{ index $existing.data "tls.key" }}
+{{- else -}}
+{{- $cn := printf "%s-ads.%s.svc" .Release.Name .Values.namespace -}}
+{{- $altNames := list $cn (printf "%s.%s" $cn "cluster.local") "localhost" -}}
+{{- $cert := genSelfSignedCert $cn nil $altNames 825 -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "ads.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+{{- end }}
+{{- end }}

@@ -89,6 +89,34 @@ if ! id "$ADS_USER" &>/dev/null; then
 fi
 install -d -o "$ADS_USER" -g "$ADS_GROUP" "$ADS_LOG_DIR" "$ADS_LIB_DIR"
 install -d -m 0755 "$ADS_CONFIG_DIR"
+install -d -m 0750 -o root -g "$ADS_GROUP" "$ADS_CONFIG_DIR/certs"
+
+# 1a. TLS certificates for the BFF endpoint.
+#     Auto-generate a self-signed cert + key pair if neither exists. Skips
+#     re-generation on re-runs so operator-supplied certs are preserved.
+#     Uses the host's FQDN as CN with 825-day validity (Apple's max for
+#     leaf certs; other clients accept it cleanly).
+ADS_CRT="$ADS_CONFIG_DIR/certs/server.crt"
+ADS_KEY="$ADS_CONFIG_DIR/certs/server.key"
+if [[ ! -f $ADS_CRT || ! -f $ADS_KEY ]]; then
+    if ! command -v openssl >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq openssl
+    fi
+    CN="$(hostname -f 2>/dev/null || hostname)"
+    log "generating self-signed TLS cert (CN=$CN, 825 days)"
+    openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout "$ADS_KEY" -out "$ADS_CRT" \
+        -days 825 -subj "/CN=$CN" \
+        -addext "subjectAltName=DNS:$CN,DNS:localhost,IP:127.0.0.1" \
+        2>/dev/null
+    chown root:"$ADS_GROUP" "$ADS_CRT" "$ADS_KEY"
+    chmod 0644 "$ADS_CRT"
+    chmod 0640 "$ADS_KEY"
+else
+    log "TLS certs already present at $ADS_CONFIG_DIR/certs/, leaving in place"
+fi
 
 # 2. Bundled Postgres
 if [[ -z $EXTERNAL_DSN ]]; then

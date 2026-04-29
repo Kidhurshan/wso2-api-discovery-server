@@ -75,7 +75,19 @@ spec:
               mountPath: /etc/ads/config.toml
               subPath: config.toml
               readOnly: true
+            - name: tls
+              mountPath: /etc/ads/certs
+              readOnly: true
       volumes:
         - name: config
           configMap:
             name: {{ include "ads.fullname" . }}-config
+        - name: tls
+          secret:
+            secretName: {{ include "ads.tlsSecret" . }}
+            items:
+              - key: tls.crt
+                path: server.crt
+              - key: tls.key
+                path: server.key
+                mode: 0400

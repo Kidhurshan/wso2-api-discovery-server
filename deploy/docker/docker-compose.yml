@@ -10,9 +10,42 @@
 # bound to 127.0.0.1 only so it isn't reachable outside the host. ADS BFF
 # listens on host port 8443; health probe on 9090.
 #
+# TLS certificates: a one-shot cert-init service generates a self-signed
+# cert + key into the `ads-certs` volume on first boot. Operators who
+# want to use their own certs can pre-populate the volume; cert-init
+# detects existing files and skips regeneration.
+#
 # To use an external Postgres instead, see docker-compose.external.yml.
 
 services:
+  cert-init:
+    image: alpine:3.19
+    container_name: ads-cert-init
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ ! -f /certs/server.crt ] || [ ! -f /certs/server.key ]; then
+          apk add --no-cache openssl >/dev/null
+          CN="${ADS_TLS_CN:-ads.local}"
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout /certs/server.key -out /certs/server.crt \
+            -days 825 -subj "/CN=$$CN" \
+            -addext "subjectAltName=DNS:$$CN,DNS:localhost,IP:127.0.0.1"
+          # Container ADS runs as uid 1000; key must be readable by it.
+          chown 1000:1000 /certs/server.crt /certs/server.key
+          chmod 0644 /certs/server.crt
+          chmod 0640 /certs/server.key
+          echo "cert-init: generated self-signed cert (CN=$$CN, 825d)"
+        else
+          echo "cert-init: certs already present, skipping"
+        fi
+    environment:
+      ADS_TLS_CN: ${ADS_TLS_CN:-ads.local}
+    volumes:
+      - ads-certs:/certs
+
   postgres:
     image: postgres:16-alpine
     container_name: ads-postgres
@@ -38,6 +71,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      cert-init:
+        condition: service_completed_successfully
     environment:
       ADS_DB_PASSWORD: ${ADS_DB_PASSWORD}
       APIM_SVC_PASSWORD: ${APIM_SVC_PASSWORD:?APIM_SVC_PASSWORD must be set in .env}
@@ -48,8 +83,10 @@ services:
       - "${ADS_HEALTH_HOST_PORT:-9090}:9090"
     volumes:
       - ./config.toml:/etc/ads/config.toml:ro
-      - ./certs:/etc/ads/certs:ro
+      - ads-certs:/etc/ads/certs:ro
 
 volumes:
   pgdata:
+    driver: local
+  ads-certs:
     driver: local

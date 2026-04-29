@@ -59,3 +59,13 @@ password
 db_password
 {{- end -}}
 {{- end }}
+
+{{/* TLS Secret name — operator-supplied existingSecret takes priority,
+     else the chart-managed <release>-ads-tls Secret rendered by tls.yaml. */}}
+{{- define "ads.tlsSecret" -}}
+{{- if .Values.tls.existingSecret -}}
+{{- .Values.tls.existingSecret -}}
+{{- else -}}
+{{- printf "%s-ads-tls" .Release.Name -}}
+{{- end -}}
+{{- end }}

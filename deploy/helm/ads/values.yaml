@@ -76,6 +76,19 @@ database:
   # / SealedSecrets / Vault.
   passwordSecret: ""
 
+# ---------------------------------------------------------------------------
+# TLS for the BFF endpoint.
+#   autoGenerate = true (default) renders a self-signed cert via Helm's
+#   genSelfSignedCert template into a kubernetes.io/tls Secret named
+#   <release>-ads-tls. Survives helm upgrade through a `lookup` guard.
+#
+#   For production with a real CA, set existingSecret to the name of a
+#   Secret you already manage (e.g. one created by cert-manager).
+# ---------------------------------------------------------------------------
+tls:
+  autoGenerate: true
+  existingSecret: ""        # if set, autoGenerate is ignored
+
 # DeepFlow — reach via the deepflow-server NodePort or ClusterIP. Use the
 # querier API (port 20416), NOT direct ClickHouse.
 deepflow:
