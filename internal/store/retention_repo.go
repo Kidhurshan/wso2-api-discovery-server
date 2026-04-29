@@ -65,13 +65,19 @@ func (r *RetentionRepo) cleanupClassifications(ctx context.Context, retentionDay
 
 // cleanupDiscoveredAPIs soft-deletes rows that haven't been seen for 7
 // days, then hard-deletes the soft-deleted ones older than retentionDays.
-// Spec §8.2.
+//
+// Anchor protection: rows with is_anchor = true are preserved regardless of
+// last_seen_at. Anchors are set by Phase 3 when a discovered API matches a
+// managed entry — keeping them alive ensures that "service is partially
+// managed" inference doesn't decay to false-shadow when the managed paths
+// go idle for longer than the retention window.
 func (r *RetentionRepo) cleanupDiscoveredAPIs(ctx context.Context, retentionDays int) error {
 	const softQ = `
         UPDATE ads_discovered_apis
            SET is_active = false
          WHERE last_seen_at < now() - INTERVAL '7 days'
            AND is_active = true
+           AND is_anchor = false
     `
 	if _, err := r.pool.Exec(ctx, softQ); err != nil {
 		return fmt.Errorf("soft-delete: %w", err)
@@ -80,6 +86,7 @@ func (r *RetentionRepo) cleanupDiscoveredAPIs(ctx context.Context, retentionDays
         DELETE FROM ads_discovered_apis
          WHERE is_active = false
            AND last_seen_at < now() - INTERVAL '%d days'
+           AND is_anchor = false
     `, retentionDays)
 	_, err := r.pool.Exec(ctx, hardQ)
 	return err

@@ -59,8 +59,12 @@ type ByReach struct {
 	Internal int `json:"internal"`
 }
 
-// GetSummary computes the summary in a single round-trip via three
-// CTEs against v_current_classifications + ads_managed_apis.
+// GetSummary computes the summary in a single round-trip via two queries
+// against v_current_classifications + ads_managed_apis.
+//
+// Per the redesign: managed table no longer stores service_identity.
+// "managed" count is just COUNT(*) of active managed rows. Per-service
+// breakdown uses the discovered side's service_identity (from the view).
 //
 // skipInternal is the daemon's [discovery].skip_internal config — passed in
 // rather than re-read from DB because the daemon cache is the truth.
@@ -69,18 +73,12 @@ func (r *BFFRepo) GetSummary(ctx context.Context, skipInternal bool) (*Summary, 
         WITH unmanaged AS (
             SELECT classification, is_internal, service_identity
               FROM v_current_classifications
-        ),
-        managed AS (
-            SELECT DISTINCT service_identity, COUNT(*) AS n
-              FROM ads_managed_apis
-             WHERE is_active = true
-             GROUP BY service_identity
         )
         SELECT
             (SELECT COUNT(*) FROM unmanaged) +
-              (SELECT COALESCE(SUM(n), 0) FROM managed)        AS total,
-            (SELECT COALESCE(SUM(n), 0) FROM managed)::int     AS managed,
-            (SELECT COUNT(*) FROM unmanaged)::int              AS unmanaged,
+              (SELECT COUNT(*) FROM ads_managed_apis WHERE is_active = true) AS total,
+            (SELECT COUNT(*) FROM ads_managed_apis WHERE is_active = true)::int AS managed,
+            (SELECT COUNT(*) FROM unmanaged)::int                              AS unmanaged,
             (SELECT COUNT(*) FROM unmanaged WHERE classification = 'shadow')::int AS shadow,
             (SELECT COUNT(*) FROM unmanaged WHERE classification = 'drift')::int  AS drift,
             (SELECT COUNT(*) FROM unmanaged WHERE is_internal = false)::int AS external,
@@ -97,7 +95,12 @@ func (r *BFFRepo) GetSummary(ctx context.Context, skipInternal bool) (*Summary, 
 	}
 	s.SkipInternal = skipInternal
 
-	// Per-service breakdown — separate query so the JSON build stays simple.
+	// Per-service breakdown — uses discovered.service_identity (from the
+	// materialized view). A service is "fully_governed" iff it has at
+	// least one anchored discovered row AND no shadow/drift findings.
+	// (We can't tell from the discovered side alone whether managed APIs
+	//  exist for a service that has zero traffic — that's the documented
+	//  limitation.)
 	const perServiceQ = `
         WITH per AS (
             SELECT service_identity,
@@ -107,10 +110,7 @@ func (r *BFFRepo) GetSummary(ctx context.Context, skipInternal bool) (*Summary, 
              GROUP BY service_identity
         )
         SELECT p.service_identity,
-               EXISTS (SELECT 1 FROM ads_managed_apis m
-                        WHERE m.service_identity = p.service_identity
-                          AND m.is_active = true)
-                 AND p.shadow = 0 AND p.drift = 0 AS fully_governed,
+               (p.shadow = 0 AND p.drift = 0) AS fully_governed,
                p.shadow,
                p.drift
           FROM per p

@@ -108,14 +108,10 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 		publisher = apim.NewPublisherClient(&cfg.APIM, auth, cfg.Managed.FetchConcurrency, apimLog)
 	}
 
-	// 6. Topology + DNS cache + resolver + shared normalizer for Phase 2.
+	// 6. Shared normalizer for Phase 2. Per the redesign, no resolver / no
+	//    DNS cache / no topology — Phase 2 reads the backend URL from APIM
+	//    and computes (gateway_path, backend_path) purely from string ops.
 	managedLog := logging.WithComponent(log, "managed")
-	topology, err := managed.NewTopology(&cfg.Deployment.Topology)
-	if err != nil {
-		return fmt.Errorf("topology: %w", err)
-	}
-	dns := managed.NewDNSCache(time.Duration(cfg.Managed.DNSCacheTTLMinutes) * time.Minute)
-	resolver := managed.NewResolver(topology, dns)
 	sharedNormalizer := discovery.NewFromConfig(&cfg.Discovery)
 
 	// 7. Boot the health server with the rich State.
@@ -170,7 +166,7 @@ func Run(ctx context.Context, cfg *config.Config, configPath string) error {
 		runCycleLoop(ctx, cfg, log, state,
 			discoveryBreaker, managedBreaker,
 			dfClient, sharedNormalizer,
-			publisher, resolver,
+			publisher,
 			serviceRepo, discoveredRepo, managedRepo, classificationRepo, pipelineRepo,
 			managedLog, comparisonLog,
 		)
@@ -205,7 +201,6 @@ func runCycleLoop(
 	df deepflow.Client,
 	norm *discovery.Normalizer,
 	publisher *apim.PublisherClient,
-	resolver *managed.Resolver,
 	serviceRepo *store.ServiceRepo,
 	discoveredRepo *store.DiscoveredRepo,
 	managedRepo *store.ManagedRepo,
@@ -225,7 +220,7 @@ func runCycleLoop(
 
 	var phase2 *managed.Pipeline
 	if publisher != nil {
-		phase2 = managed.NewPipeline(managedLog, publisher, resolver, norm, managedRepo, pipelineRepo)
+		phase2 = managed.NewPipeline(managedLog, publisher, norm, managedRepo, pipelineRepo)
 	} else {
 		cycleLog.Info("phase 2 disabled (apim auth not initialized)")
 	}

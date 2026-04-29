@@ -15,11 +15,8 @@ var (
 )
 
 // Validate checks the loaded Config for required fields, enum values, sane
-// numeric ranges, and compiles every normalization regex (storing the result
-// on the rule for later reuse by the discovery package).
-//
-// Errors are accumulated; all problems are reported in one pass so the
-// operator can fix them together.
+// numeric ranges, and compiles every normalization regex. Errors accumulate;
+// all problems are reported in one pass so the operator can fix them together.
 func (c *Config) Validate() error {
 	var errs []error
 
@@ -56,7 +53,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("[database] max_idle_conns: must be >= 0"))
 	}
 
-	// [deepflow] — optional, but URL must parse if present
+	// [deepflow]
 	if c.DeepFlow.Enabled {
 		if c.DeepFlow.ClickHouseURL == "" {
 			errs = append(errs, errors.New("[deepflow] clickhouse_url: required when enabled=true"))
@@ -102,39 +99,26 @@ func (c *Config) Validate() error {
 	}
 
 	// [discovery.noise_filter]
-	if c.Discovery.NoiseFilter.PathPattern != "" {
-		if _, err := regexp.Compile(c.Discovery.NoiseFilter.PathPattern); err != nil {
-			errs = append(errs, fmt.Errorf("[discovery.noise_filter] path_pattern: invalid regex: %w", err))
+	for i, p := range c.Discovery.NoiseFilter.PathPatterns {
+		if p == "" {
+			errs = append(errs, fmt.Errorf("[discovery.noise_filter] path_patterns[%d]: empty entry not allowed", i))
 		}
 	}
-	for _, p := range c.Discovery.NoiseFilter.Ports {
+	for i, p := range c.Discovery.NoiseFilter.PathExact {
+		if p == "" {
+			errs = append(errs, fmt.Errorf("[discovery.noise_filter] path_exact[%d]: empty entry not allowed", i))
+		}
+	}
+	for _, p := range c.Discovery.NoiseFilter.ExcludedPorts {
 		if p <= 0 || p > 65535 {
-			errs = append(errs, fmt.Errorf("[discovery.noise_filter] ports: %d not in 1..65535", p))
+			errs = append(errs, fmt.Errorf("[discovery.noise_filter] excluded_ports: %d not in 1..65535", p))
 		}
 	}
 
-	// [discovery.normalization_rules]: compile each, fail on bad regex.
-	if c.Discovery.NormalizationRulesMeta.Version == "" {
-		errs = append(errs, errors.New("[discovery.normalization_rules_meta] version: required"))
-	}
-	for i := range c.Discovery.NormalizationRules {
-		rule := &c.Discovery.NormalizationRules[i]
-		if rule.Name == "" {
-			errs = append(errs, fmt.Errorf("[[discovery.normalization_rules]] #%d: name required", i))
-		}
-		if rule.Pattern == "" {
-			errs = append(errs, fmt.Errorf("[[discovery.normalization_rules]] %s: pattern required", rule.Name))
-			continue
-		}
-		if rule.Placeholder == "" {
-			errs = append(errs, fmt.Errorf("[[discovery.normalization_rules]] %s: placeholder required", rule.Name))
-		}
-		compiled, err := regexp.Compile(rule.Pattern)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("[[discovery.normalization_rules]] %s: invalid regex %q: %w", rule.Name, rule.Pattern, err))
-			continue
-		}
-		rule.Compiled = compiled
+	// [discovery.normalization] — compile every regex once and store on
+	// the config for reuse by the normalizer.
+	if errs2 := c.compileNormalizationPatterns(); len(errs2) > 0 {
+		errs = append(errs, errs2...)
 	}
 
 	// [managed]
@@ -144,28 +128,10 @@ func (c *Config) Validate() error {
 	if c.Managed.FetchConcurrency <= 0 {
 		errs = append(errs, errors.New("[managed] fetch_concurrency: must be > 0"))
 	}
-	if c.Managed.DNSCacheTTLMinutes <= 0 {
-		errs = append(errs, errors.New("[managed] dns_cache_ttl_minutes: must be > 0"))
-	}
 
 	// [comparison]
 	if c.Comparison.FreshnessThresholdMultiplier <= 0 {
 		errs = append(errs, errors.New("[comparison] freshness_threshold_multiplier: must be > 0"))
-	}
-
-	// [deployment.topology]
-	for i, n := range c.Deployment.Topology.K8sNodes {
-		if net.ParseIP(n.IP) == nil {
-			errs = append(errs, fmt.Errorf("[deployment.topology.k8s_nodes] #%d ip %q: not a valid IP", i, n.IP))
-		}
-		if n.DefaultNamespace == "" {
-			errs = append(errs, fmt.Errorf("[deployment.topology.k8s_nodes] #%d: default_namespace required", i))
-		}
-	}
-	for i, ip := range c.Deployment.Topology.LegacyChosts {
-		if net.ParseIP(ip) == nil {
-			errs = append(errs, fmt.Errorf("[deployment.topology.legacy_chosts] #%d %q: not a valid IP", i, ip))
-		}
 	}
 
 	// [bff]
@@ -206,6 +172,57 @@ func (c *Config) Validate() error {
 		return nil
 	}
 	return errors.Join(errs...)
+}
+
+// compileNormalizationPatterns compiles every entry in builtin_patterns,
+// user_patterns, and exclude_patterns. Returns one error per bad pattern
+// and stores the compiled regex objects back on the config for reuse.
+func (c *Config) compileNormalizationPatterns() []error {
+	var errs []error
+	n := &c.Discovery.Normalization
+
+	compileList := func(list []string, label string) []*regexp.Regexp {
+		out := make([]*regexp.Regexp, 0, len(list))
+		for i, pat := range list {
+			if pat == "" {
+				errs = append(errs, fmt.Errorf("[discovery.normalization] %s[%d]: empty pattern not allowed", label, i))
+				continue
+			}
+			compiled, err := regexp.Compile(pat)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("[discovery.normalization] %s[%d] %q: invalid regex: %w", label, i, pat, err))
+				continue
+			}
+			out = append(out, compiled)
+		}
+		return out
+	}
+
+	n.CompiledBuiltin = compileList(n.BuiltinPatterns, "builtin_patterns")
+	n.CompiledUser = compileList(n.UserPatterns, "user_patterns")
+	n.CompiledExclude = compileList(n.ExcludePatterns, "exclude_patterns")
+
+	// version_pattern: must compile if present, and should also appear in
+	// exclude_patterns (otherwise versions like "1.0.0" get normalized to
+	// "{id}", which wrecks path matching).
+	if n.VersionPattern != "" {
+		if _, err := regexp.Compile(n.VersionPattern); err != nil {
+			errs = append(errs, fmt.Errorf("[discovery.normalization] version_pattern %q: invalid regex: %w", n.VersionPattern, err))
+		} else {
+			found := false
+			for _, p := range n.ExcludePatterns {
+				if p == n.VersionPattern {
+					found = true
+					break
+				}
+			}
+			if !found {
+				errs = append(errs, fmt.Errorf("[discovery.normalization] version_pattern is set but the same regex is not in exclude_patterns; version segments will be normalized to {id}"))
+			}
+		}
+	}
+
+	return errs
 }
 
 // DSN builds a libpq-compatible Postgres connection string from the Database

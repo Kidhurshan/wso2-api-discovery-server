@@ -5,77 +5,111 @@ import (
 	"testing"
 
 	"github.com/wso2/api-discovery-server/internal/apim"
-	"github.com/wso2/api-discovery-server/internal/config"
 	"github.com/wso2/api-discovery-server/internal/discovery"
 )
 
 // shareNormalizer builds the same normalizer Phase 1 uses, with the
-// production rule set.
+// segment-based default pattern set.
 func shareNormalizer(t *testing.T) *discovery.Normalizer {
 	t.Helper()
-	rules := []config.NormalizationRule{
-		{Name: "uuid_v4", Pattern: `/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(/|$)`, Placeholder: "/{id}$1"},
-		{Name: "iso_date", Pattern: `/\d{4}-\d{2}-\d{2}(/|$)`, Placeholder: "/{id}$1"},
-		{Name: "mongo_objectid", Pattern: `/[0-9a-f]{24}(/|$)`, Placeholder: "/{id}$1"},
-		{Name: "customer_id", Pattern: `/CUST-[A-Z0-9]+(/|$)`, Placeholder: "/{id}$1"},
-		{Name: "sku_pattern", Pattern: `/[A-Z]{3,}(?:-[A-Z0-9]+)+(/|$)`, Placeholder: "/{id}$1"},
-		{Name: "numeric_id", Pattern: `/[0-9]+(/|$)`, Placeholder: "/{id}$1"},
+	mustCompile := func(patterns ...string) []*regexp.Regexp {
+		out := make([]*regexp.Regexp, len(patterns))
+		for i, p := range patterns {
+			out[i] = regexp.MustCompile(p)
+		}
+		return out
 	}
-	for i := range rules {
-		rules[i].Compiled = regexp.MustCompile(rules[i].Pattern)
-	}
-	return &discovery.Normalizer{Version: "v1", Rules: rules}
+	return discovery.NewNormalizerFromRegexes(
+		mustCompile(
+			`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
+			`^[0-9a-fA-F]{24,}$`,
+			`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`,
+			`^[0-9]+$`,
+			`^[A-Za-z0-9_-]{20,}={0,2}$`,
+			`^[A-Z]{2,5}-[A-Z0-9-]{3,}$`,
+		),
+		nil, // user_patterns
+		mustCompile(
+			`^v?[0-9]+\.[0-9]+(\.[0-9]+)?$`,
+			`^v[0-9]+$`,
+			`^api$`,
+		),
+	)
 }
 
-func TestExpandTwoPassNormalization(t *testing.T) {
+func TestExpandComposesGatewayAndBackendPaths(t *testing.T) {
 	exp := NewExpander(shareNormalizer(t))
 
 	api := &apim.APIDetail{
 		APISummary: apim.APISummary{
-			ID: "u1", Name: "OrdersAPI", Version: "1.0.0", Context: "/orders/1.0.0",
+			ID: "u1", Name: "ProductsAPI", Version: "1.0.0", Context: "/prod/1.0.0",
 			LifeCycleStatus: "PUBLISHED",
 		},
+		EndpointConfig: apim.EndpointConfig{
+			ProductionEndpoints: &apim.ProductionEndpoint{URL: "http://products-service:8080/products/v1"},
+			EndpointType:        "http",
+		},
 		Operations: []apim.Operation{
-			{Verb: "POST", Target: "/orders"},
-			{Verb: "GET", Target: "/orders/{orderId}"},
-			// APIM placeholder + path-style customer ID — Pass A collapses
-			// both to {id}.
-			{Verb: "GET", Target: "/customers/{customerId}/orders/{orderId}"},
+			{Verb: "POST", Target: "/items"},
+			{Verb: "GET", Target: "/items/{itemId}"},
+			{Verb: "GET", Target: "/customers/{customerId}/items/{itemId}"},
 		},
 	}
-	res := &ResolverResult{EnvKind: "k8s", ServiceIdentity: "k8s:techmart/orders"}
 
-	out := exp.Expand(api, res)
+	out := exp.Expand(api)
 	if len(out) != 3 {
 		t.Fatalf("got %d ops, want 3", len(out))
 	}
 
-	wantPaths := map[string]string{
-		"POST": "/orders/1.0.0/orders",
-		"GET":  "", // first GET; we'll check below explicitly
+	// gateway_path = context + version + target (with version-dedup)
+	if got, want := out[0].GatewayPath, "/prod/1.0.0/items"; got != want {
+		t.Errorf("op0 gateway_path = %q, want %q", got, want)
 	}
-	_ = wantPaths
-
-	if out[0].GatewayPath != "/orders/1.0.0/orders" {
-		t.Errorf("op0 gateway_path = %q", out[0].GatewayPath)
+	if got, want := out[1].GatewayPath, "/prod/1.0.0/items/{id}"; got != want {
+		t.Errorf("op1 gateway_path = %q, want %q", got, want)
 	}
-	if out[1].GatewayPath != "/orders/1.0.0/orders/{id}" {
-		t.Errorf("op1 gateway_path = %q (want /orders/1.0.0/orders/{id})", out[1].GatewayPath)
-	}
-	if out[2].GatewayPath != "/orders/1.0.0/customers/{id}/orders/{id}" {
-		t.Errorf("op2 gateway_path = %q", out[2].GatewayPath)
+	if got, want := out[2].GatewayPath, "/prod/1.0.0/customers/{id}/items/{id}"; got != want {
+		t.Errorf("op2 gateway_path = %q, want %q", got, want)
 	}
 
-	// Raw placeholders preserved per spec — Phase 4 detail view shows them.
-	if len(out[2].RawPlaceholders) != 2 {
-		t.Errorf("op2 raw_placeholders = %v (want 2 entries)", out[2].RawPlaceholders)
+	// backend_path = backend URL.path + target
+	if got, want := out[0].BackendPath, "/products/v1/items"; got != want {
+		t.Errorf("op0 backend_path = %q, want %q", got, want)
 	}
+	if got, want := out[1].BackendPath, "/products/v1/items/{id}"; got != want {
+		t.Errorf("op1 backend_path = %q, want %q", got, want)
+	}
+}
 
-	// Service identity & method propagated from resolver result.
-	for i, op := range out {
-		if op.ServiceIdentity != "k8s:techmart/orders" {
-			t.Errorf("op%d service_identity = %q", i, op.ServiceIdentity)
-		}
+func TestExpandWithNoBackendBasePath(t *testing.T) {
+	exp := NewExpander(shareNormalizer(t))
+	api := &apim.APIDetail{
+		APISummary: apim.APISummary{Context: "/orders", Version: "1.0.0"},
+		EndpointConfig: apim.EndpointConfig{
+			ProductionEndpoints: &apim.ProductionEndpoint{URL: "http://orders:8080"},
+			EndpointType:        "http",
+		},
+		Operations: []apim.Operation{{Verb: "GET", Target: "/items/{id}"}},
+	}
+	out := exp.Expand(api)
+	if got, want := out[0].BackendPath, "/items/{id}"; got != want {
+		t.Errorf("backend_path = %q, want %q (no base path → just target)", got, want)
+	}
+}
+
+func TestExpandWithTrailingSlashInBackendURL(t *testing.T) {
+	exp := NewExpander(shareNormalizer(t))
+	api := &apim.APIDetail{
+		APISummary: apim.APISummary{Context: "/x", Version: "1.0.0"},
+		EndpointConfig: apim.EndpointConfig{
+			ProductionEndpoints: &apim.ProductionEndpoint{URL: "https://api.acme.com/v2/"},
+			EndpointType:        "http",
+		},
+		Operations: []apim.Operation{{Verb: "GET", Target: "/users"}},
+	}
+	out := exp.Expand(api)
+	if got, want := out[0].BackendPath, "/v2/users"; got != want {
+		t.Errorf("backend_path = %q, want %q (trailing slash trimmed)", got, want)
 	}
 }
 
@@ -85,7 +119,7 @@ func TestExpandUppercasesMethod(t *testing.T) {
 		APISummary: apim.APISummary{Context: "/x", Version: "1"},
 		Operations: []apim.Operation{{Verb: "get", Target: "/y"}},
 	}
-	out := exp.Expand(api, &ResolverResult{})
+	out := exp.Expand(api)
 	if out[0].Method != "GET" {
 		t.Errorf("verb = %q, want GET", out[0].Method)
 	}

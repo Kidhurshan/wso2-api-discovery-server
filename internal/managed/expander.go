@@ -1,6 +1,7 @@
 package managed
 
 import (
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -9,20 +10,22 @@ import (
 )
 
 // apimPlaceholderRe matches WSO2's `{paramName}` style placeholders in
-// operation targets. Per spec phase2_managed_sync.md §6 we collapse these
-// to a uniform `/{id}` (Pass A) before applying the Phase 1 normalizer
+// operation targets. Per claude/specs/phase2_managed_sync.md §6 we collapse
+// these to a uniform `/{id}` (Pass A) before applying the Phase 1 normalizer
 // (Pass B) — this guarantees Phase 1's discovered_path and Phase 2's
-// gateway_path use the same vocabulary so Phase 3 can join them by
-// equality on (method, normalized_path).
+// gateway/backend paths use the same vocabulary so Phase 3 can join them by
+// equality on (method, path).
 var apimPlaceholderRe = regexp.MustCompile(`\{[^}/]+\}`)
 
 // rawPlaceholderRe is identical to apimPlaceholderRe but with a capture
-// group, used to extract original placeholder names for the row's
-// raw_placeholders[] column.
+// group for extracting original placeholder names if a caller wants them.
 var rawPlaceholderRe = regexp.MustCompile(`\{([^}/]+)\}`)
 
 // ManagedOperation is one expanded (api, verb, target) tuple, ready to be
 // upserted into ads_managed_apis.
+//
+// Per the redesign: no env_kind, no service_identity, no backend host/port.
+// Phase 3 matches on (method, gateway_path | backend_path) only.
 type ManagedOperation struct {
 	APIID              string
 	APIName            string
@@ -31,30 +34,21 @@ type ManagedOperation struct {
 	APIProvider        string
 	APILifecycleStatus string
 
-	EnvKind         string
-	ServiceIdentity string
-
-	Method             string
-	GatewayPath        string
-	OperationTarget    string
-	RawOperationTarget string
-	RawPlaceholders    []string
-	AuthType           string
-	ThrottlingPolicy   string
-
-	BackendURL          string
-	BackendResolvedIP   string
-	BackendResolvedPort int
+	Method       string
+	GatewayPath  string // /prod/1.0.0/item/{id}    — what the client sees
+	BackendPath  string // /products/v1/item/{id}   — what the backend sees
+	BackendURL   string // raw URL string for debug / display
+	AuthType     string
+	ThrottlingPolicy string
 
 	Warnings []string
 }
 
-// Expander turns one APIDetail + ResolverResult into a slice of
-// ManagedOperation rows by walking api.Operations and applying the
-// two-pass placeholder normalization.
+// Expander turns one APIDetail into a slice of ManagedOperation rows by
+// walking api.Operations and applying the two-pass placeholder normalization.
 //
 // The normalizer here is the SAME *discovery.Normalizer instance Phase 1
-// uses, loaded from the same config — single source of truth for
+// uses, loaded from the same config — single source of truth for the
 // normalization rules.
 type Expander struct {
 	norm *discovery.Normalizer
@@ -66,24 +60,17 @@ func NewExpander(norm *discovery.Normalizer) *Expander {
 }
 
 // Expand walks api.Operations and produces one ManagedOperation per
-// operation. Each gateway_path is computed by composeGatewayPath, then run
-// through Pass A (APIM placeholders → "{id}") and Pass B (the shared Phase
-// 1 normalizer).
-func (e *Expander) Expand(api *apim.APIDetail, res *ResolverResult) []ManagedOperation {
+// operation. Each path (both gateway and backend forms) is computed from
+// the URL components, then run through Pass A (APIM placeholders → "{id}")
+// and Pass B (the shared Phase 1 normalizer).
+func (e *Expander) Expand(api *apim.APIDetail) []ManagedOperation {
+	rawBackend := backendURL(api)
+	backendBase := backendBasePath(rawBackend)
+
 	out := make([]ManagedOperation, 0, len(api.Operations))
 	for _, op := range api.Operations {
-		raw := composeGatewayPath(api.Context, api.Version, op.Target)
-		// Pass A: collapse APIM placeholders before path-segment regexes
-		// have a chance to look at them, otherwise patterns like
-		// `/CUST-{id}` would never match.
-		passA := apimPlaceholderRe.ReplaceAllString(raw, "{id}")
-		// Pass B: full Phase 1 normalizer (numeric ids, UUIDs, SKUs, ...).
-		gatewayPath := e.norm.Normalize(passA)
-
-		var rawPlaceholders []string
-		for _, m := range rawPlaceholderRe.FindAllStringSubmatch(op.Target, -1) {
-			rawPlaceholders = append(rawPlaceholders, m[1])
-		}
+		gateway := composeGatewayPath(api.Context, api.Version, op.Target)
+		backend := backendBase + op.Target
 
 		out = append(out, ManagedOperation{
 			APIID:              api.ID,
@@ -92,42 +79,32 @@ func (e *Expander) Expand(api *apim.APIDetail, res *ResolverResult) []ManagedOpe
 			APIContext:         api.Context,
 			APIProvider:        api.Provider,
 			APILifecycleStatus: api.LifeCycleStatus,
-
-			EnvKind:         res.EnvKind,
-			ServiceIdentity: res.ServiceIdentity,
-
 			Method:             strings.ToUpper(op.Verb),
-			GatewayPath:        gatewayPath,
-			OperationTarget:    op.Target,
-			RawOperationTarget: op.Target,
-			RawPlaceholders:    rawPlaceholders,
+			GatewayPath:        normalizePath(e.norm, gateway),
+			BackendPath:        normalizePath(e.norm, backend),
+			BackendURL:         rawBackend,
 			AuthType:           op.AuthType,
 			ThrottlingPolicy:   op.ThrottlingPolicy,
-
-			BackendURL:          backendURL(api),
-			BackendResolvedIP:   res.BackendIP,
-			BackendResolvedPort: res.BackendPort,
-
-			Warnings: res.Warnings,
 		})
 	}
 	return out
 }
 
+// normalizePath applies the two-pass collapse: APIM placeholders first,
+// then the shared Phase 1 normalizer.
+func normalizePath(n *discovery.Normalizer, path string) string {
+	passA := apimPlaceholderRe.ReplaceAllString(path, "{id}")
+	if n == nil {
+		return passA
+	}
+	return n.Normalize(passA)
+}
+
 // composeGatewayPath joins APIM's context, version, and operation target.
 //
-// The spec (phase2_managed_sync.md §6) writes the formula as
-// "context + / + version + target". In practice, modern WSO2 APIM emits
-// context already including the version segment (e.g., context="/orders/1.0.0"
-// version="1.0.0"). Naïvely concatenating duplicates the version: the spec's
-// formula yields "/orders/1.0.0/1.0.0/orders" for the TechMart layout.
-//
-// This helper handles both conventions:
-//   - if context already ends with "/" + version, use context + target
-//   - otherwise, use context + "/" + version + target (spec's older form)
-//
-// Result is functionally identical to the spec's intent, with no version
-// duplication.
+// Modern WSO2 APIM emits context already including the version segment
+// (e.g., context="/orders/1.0.0", version="1.0.0"). Naïvely concatenating
+// would duplicate the version. This helper handles both conventions.
 func composeGatewayPath(context, version, target string) string {
 	versionSuffix := "/" + version
 	if version != "" && strings.HasSuffix(context, versionSuffix) {
@@ -139,6 +116,27 @@ func composeGatewayPath(context, version, target string) string {
 	return context + target
 }
 
+// backendBasePath returns the path component of the backend URL, with the
+// trailing slash trimmed. Returns "" when the URL is empty, malformed, or
+// has no path component.
+//
+// Examples:
+//
+//	"http://orders:8080"               → ""
+//	"http://orders:8080/"              → ""
+//	"http://products:8080/products/v1" → "/products/v1"
+//	"https://api.acme.com/v2/"         → "/v2"
+func backendBasePath(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(u.Path, "/")
+}
+
 // backendURL extracts the production endpoint URL from the API detail.
 // Returns "" if absent so callers see an empty backend_url column rather
 // than failing the upsert.
@@ -147,4 +145,19 @@ func backendURL(api *apim.APIDetail) string {
 		return ""
 	}
 	return api.EndpointConfig.ProductionEndpoints.URL
+}
+
+// rawPlaceholders extracts the placeholder names from an operation target.
+// Useful if a future enhancement wants to display "{customerId}" alongside
+// the normalized "{id}" in the UI.
+func rawPlaceholders(target string) []string {
+	matches := rawPlaceholderRe.FindAllStringSubmatch(target, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, m[1])
+	}
+	return out
 }

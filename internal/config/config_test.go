@@ -48,34 +48,28 @@ poll_interval_minutes = 5
 window_minutes = 5
 status_min = 200
 status_max = 400
-skip_internal = true
+skip_internal = false
 min_observations = 1
 max_signatures_per_window = 10000
 
 [discovery.noise_filter]
-path_pattern = "^/(health|metrics)$"
-ports = [9090]
-domains = ["k.svc"]
+path_patterns = ["/health", "/metrics"]
+path_exact = ["/", "/version"]
+excluded_ports = [9090]
+excluded_domains = ["k.svc"]
 
-[discovery.normalization_rules_meta]
-version = "v1"
-
-[[discovery.normalization_rules]]
-name = "numeric_id"
-pattern = '/[0-9]+\b'
-placeholder = '/{id}'
+[discovery.normalization]
+version_pattern = "^v?[0-9]+\\.[0-9]+(\\.[0-9]+)?$"
+builtin_patterns = ["^[0-9]+$"]
+user_patterns = []
+exclude_patterns = ["^v?[0-9]+\\.[0-9]+(\\.[0-9]+)?$"]
 
 [managed]
 poll_interval_minutes = 10
 fetch_concurrency = 5
-dns_cache_ttl_minutes = 5
 
 [comparison]
 freshness_threshold_multiplier = 3
-
-[deployment.topology]
-k8s_nodes = [{ ip = "10.50.1.10", default_namespace = "techmart" }]
-legacy_chosts = ["10.50.1.11"]
 
 [bff]
 listen_addr = "0.0.0.0:8443"
@@ -125,9 +119,12 @@ func TestLoadValidates(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate on minimal-valid: %v", err)
 	}
-	// Validate should compile the regex onto the rule.
-	if cfg.Discovery.NormalizationRules[0].Compiled == nil {
-		t.Error("Validate did not compile normalization regex")
+	// Validate should populate the compiled regex slices.
+	if len(cfg.Discovery.Normalization.CompiledBuiltin) != 1 {
+		t.Errorf("Validate did not compile builtin patterns: got %d", len(cfg.Discovery.Normalization.CompiledBuiltin))
+	}
+	if len(cfg.Discovery.Normalization.CompiledExclude) != 1 {
+		t.Errorf("Validate did not compile exclude patterns: got %d", len(cfg.Discovery.Normalization.CompiledExclude))
 	}
 }
 
@@ -156,10 +153,10 @@ func TestValidateDetectsErrors(t *testing.T) {
 		{"bad log level", func(c *Config) { c.ADS.LogLevel = "verbose" }, "log_level"},
 		{"missing apim publisher_url", func(c *Config) { c.APIM.PublisherURL = "" }, "publisher_url"},
 		{"discovery status_max <= status_min", func(c *Config) { c.Discovery.StatusMax = 200 }, "status_max"},
-		{"bad noise regex", func(c *Config) { c.Discovery.NoiseFilter.PathPattern = "[invalid" }, "noise_filter"},
-		{"bad normalization regex", func(c *Config) { c.Discovery.NormalizationRules[0].Pattern = "[invalid" }, "normalization_rules"},
-		{"bad k8s node ip", func(c *Config) { c.Deployment.Topology.K8sNodes[0].IP = "not.an.ip" }, "k8s_nodes"},
-		{"bad legacy chost ip", func(c *Config) { c.Deployment.Topology.LegacyChosts[0] = "x.y.z" }, "legacy_chosts"},
+		{"bad builtin regex", func(c *Config) { c.Discovery.Normalization.BuiltinPatterns[0] = "[invalid" }, "builtin_patterns"},
+		{"bad exclude regex", func(c *Config) { c.Discovery.Normalization.ExcludePatterns[0] = "[invalid" }, "exclude_patterns"},
+		{"empty noise pattern", func(c *Config) { c.Discovery.NoiseFilter.PathPatterns = []string{""} }, "path_patterns"},
+		{"empty noise exact", func(c *Config) { c.Discovery.NoiseFilter.PathExact = []string{""} }, "path_exact"},
 		{"bff bad listen addr", func(c *Config) { c.BFF.ListenAddr = "no_port" }, "[bff] listen_addr"},
 		{"bff zero ttl", func(c *Config) { c.BFF.TokenCache.TTLSeconds = 0 }, "ttl_seconds"},
 		{"bad health addr", func(c *Config) { c.Health.ListenAddr = "" }, "[health] listen_addr"},

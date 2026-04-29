@@ -18,7 +18,6 @@ type Config struct {
 	Discovery  DiscoveryConfig  `toml:"discovery"`
 	Managed    ManagedConfig    `toml:"managed"`
 	Comparison ComparisonConfig `toml:"comparison"`
-	Deployment DeploymentConfig `toml:"deployment"`
 	BFF        BFFConfig        `toml:"bff"`
 	Health     HealthConfig     `toml:"health"`
 	K8s        K8sConfig        `toml:"k8s"`
@@ -39,7 +38,7 @@ type DatabaseConfig struct {
 	Name                  string `toml:"name"`
 	User                  string `toml:"user"`
 	Password              string `toml:"password"`
-	SSLMode               string `toml:"sslmode"` // disable | require | verify-ca | verify-full
+	SSLMode               string `toml:"sslmode"`
 	MaxOpenConns          int    `toml:"max_open_conns"`
 	MaxIdleConns          int    `toml:"max_idle_conns"`
 	ConnectTimeoutSeconds int    `toml:"connect_timeout_seconds"`
@@ -76,38 +75,60 @@ type DiscoveryConfig struct {
 	MinObservations        int                 `toml:"min_observations"`
 	MaxSignaturesPerWindow int                 `toml:"max_signatures_per_window"`
 	NoiseFilter            NoiseFilterConfig   `toml:"noise_filter"`
-	NormalizationRulesMeta NormRulesMetaConfig `toml:"normalization_rules_meta"`
-	NormalizationRules     []NormalizationRule `toml:"normalization_rules"`
+	Normalization          NormalizationConfig `toml:"normalization"`
 }
 
-// NoiseFilterConfig holds [discovery.noise_filter].
-type NoiseFilterConfig struct {
-	PathPattern string   `toml:"path_pattern"`
-	Ports       []int    `toml:"ports"`
-	Domains     []string `toml:"domains"`
-}
-
-// NormRulesMetaConfig holds [discovery.normalization_rules_meta].
-type NormRulesMetaConfig struct {
-	Version string `toml:"version"`
-}
-
-// NormalizationRule is one [[discovery.normalization_rules]] entry.
+// NoiseFilterConfig is [discovery.noise_filter].
 //
-// Compiled is populated by Validate() so the rule engine can reuse the
-// pre-compiled regexp. It is not parsed from TOML.
-type NormalizationRule struct {
-	Name        string         `toml:"name"`
-	Pattern     string         `toml:"pattern"`
-	Placeholder string         `toml:"placeholder"`
-	Compiled    *regexp.Regexp `toml:"-"`
+// PathPatterns and PathExact are checked Go-side. PathPatterns is a
+// substring (CONTAINS) check — drops any path containing the entry as
+// a substring (e.g. "/health" drops "/orders/1.0.0/health" too).
+// PathExact is an equality check — drops only paths exactly equal to
+// the entry (used for paths like "/" where CONTAINS would over-match).
+//
+// ExcludedPorts and ExcludedDomains are passed to the DeepFlow query
+// (server_port NOT IN, request_domain NOT IN).
+type NoiseFilterConfig struct {
+	PathPatterns    []string `toml:"path_patterns"`
+	PathExact       []string `toml:"path_exact"`
+	ExcludedPorts   []int    `toml:"excluded_ports"`
+	ExcludedDomains []string `toml:"excluded_domains"`
+}
+
+// NormalizationConfig is [discovery.normalization].
+//
+// Algorithm (per-segment):
+//  1. Split path by '/'
+//  2. For each non-empty segment:
+//     - if any ExcludePatterns regex matches → keep the segment as-is
+//       (used to preserve API version segments like "1.0.0", "v1")
+//     - else if any BuiltinPatterns or UserPatterns regex matches →
+//       replace the segment with "{id}"
+//     - else keep the segment as-is
+//  3. Rejoin with '/'
+//
+// All patterns are anchored with ^...$ because they match a single
+// segment, not the whole path.
+//
+// VersionPattern is documentation only — the same regex must also be
+// the first entry of ExcludePatterns. Validate() warns if they diverge.
+type NormalizationConfig struct {
+	VersionPattern  string   `toml:"version_pattern"`
+	BuiltinPatterns []string `toml:"builtin_patterns"`
+	UserPatterns    []string `toml:"user_patterns"`
+	ExcludePatterns []string `toml:"exclude_patterns"`
+
+	// Compiled* fields are populated by Validate(). The normalizer reuses
+	// the pre-compiled regexes to avoid recompiling on every cycle.
+	CompiledBuiltin []*regexp.Regexp `toml:"-"`
+	CompiledUser    []*regexp.Regexp `toml:"-"`
+	CompiledExclude []*regexp.Regexp `toml:"-"`
 }
 
 // ManagedConfig is the [managed] block (Phase 2).
 type ManagedConfig struct {
 	PollIntervalMinutes int `toml:"poll_interval_minutes"`
 	FetchConcurrency    int `toml:"fetch_concurrency"`
-	DNSCacheTTLMinutes  int `toml:"dns_cache_ttl_minutes"`
 }
 
 // PollInterval returns the managed poll interval as a Duration.
@@ -118,30 +139,6 @@ func (m ManagedConfig) PollInterval() time.Duration {
 // ComparisonConfig is the [comparison] block (Phase 3).
 type ComparisonConfig struct {
 	FreshnessThresholdMultiplier int `toml:"freshness_threshold_multiplier"`
-}
-
-// DeploymentConfig is the [deployment] block; nests topology.
-type DeploymentConfig struct {
-	Topology TopologyConfig `toml:"topology"`
-}
-
-// TopologyConfig is [deployment.topology].
-type TopologyConfig struct {
-	K8sNodes           []K8sNode           `toml:"k8s_nodes"`
-	LegacyChosts       []string            `toml:"legacy_chosts"`
-	NamespaceOverrides []NamespaceOverride `toml:"namespace_overrides"`
-}
-
-// K8sNode is one entry in [deployment.topology].k8s_nodes.
-type K8sNode struct {
-	IP               string `toml:"ip"`
-	DefaultNamespace string `toml:"default_namespace"`
-}
-
-// NamespaceOverride is one [[deployment.topology.namespace_overrides]] entry.
-type NamespaceOverride struct {
-	APIID     string `toml:"api_id"`
-	Namespace string `toml:"namespace"`
 }
 
 // BFFConfig is the [bff] block.
@@ -167,7 +164,9 @@ type HealthConfig struct {
 }
 
 // K8sConfig is the [k8s] block. When Enabled is false, leader election is
-// bypassed and the daemon runs cycles in single-instance mode.
+// bypassed and the daemon runs cycles in single-instance mode. The same
+// config.toml works for VM (block disabled) and K8s (block enabled with
+// values populated from the Downward API).
 type K8sConfig struct {
 	Enabled   bool   `toml:"enabled"`
 	Namespace string `toml:"namespace"`

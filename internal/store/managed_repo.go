@@ -22,6 +22,9 @@ func NewManagedRepo(pool *pgxpool.Pool) *ManagedRepo {
 // ManagedSync is the input shape for Sync. One per (api_id, method,
 // gateway_path) — the expander already performs the per-operation
 // expansion before reaching the store.
+//
+// Per the redesign: no env_kind, no service_identity, no backend resolved
+// IP/port. The match key is (method, gateway_path | backend_path) only.
 type ManagedSync struct {
 	APIMAPIID           string
 	APIMAPIName         string
@@ -30,40 +33,28 @@ type ManagedSync struct {
 	APIMAPIProvider     string
 	APIMLifecycleStatus string
 
-	EnvKind         string // 'k8s' | 'legacy' | 'unknown'
-	ServiceIdentity string
+	Method      string
+	GatewayPath string // /prod/1.0.0/item/{id}    — what the client sees
+	BackendPath string // /products/v1/item/{id}   — what the backend sees
+	BackendURL  string // raw URL for debug / display
 
-	Method             string
-	GatewayPath        string
-	OperationTarget    string
-	RawOperationTarget string
-	RawPlaceholders    []string
-	AuthType           string
-	ThrottlingPolicy   string
-
-	BackendURL          string
-	BackendResolvedIP   string
-	BackendResolvedPort int
+	AuthType         string
+	ThrottlingPolicy string
 
 	APIMUpdatedTime time.Time
 	Warnings        []string
 }
 
-// Sync executes the spec's two-step transaction (claude/specs/
-// phase2_managed_sync.md §8):
+// Sync executes the spec's two-step transaction:
 //  1. Upsert every operation in items, marking is_active = true and
 //     updating last_synced_at = syncStartedAt.
-//  2. Soft-delete any row whose last_synced_at is older than syncStartedAt
-//     (i.e., not in the current sync), preserving history per spec §8.
-//
-// Both steps run in one Postgres transaction so a partial failure leaves
-// the table consistent.
+//  2. Soft-delete any row whose last_synced_at is older than syncStartedAt.
 func (r *ManagedRepo) Sync(ctx context.Context, items []ManagedSync, syncStartedAt time.Time) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }() // no-op if Commit succeeded
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if err := r.upsertAll(ctx, tx, items, syncStartedAt); err != nil {
 		return err
@@ -82,19 +73,17 @@ const managedUpsertSQL = `
 INSERT INTO ads_managed_apis (
     apim_api_id, apim_api_name, apim_api_version, apim_api_context,
     apim_api_provider, apim_lifecycle_status,
-    env_kind, service_identity,
-    method, gateway_path, operation_target, raw_operation_target,
-    raw_placeholders, auth_type, throttling_policy,
-    backend_url, backend_resolved_ip, backend_resolved_port,
+    method, gateway_path, backend_path,
+    auth_type, throttling_policy,
+    backend_url,
     apim_updated_time, last_synced_at, is_active, warnings
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6,
-    $7, $8,
-    $9, $10, $11, $12,
-    $13, $14, $15,
-    $16, $17, $18,
-    $19, $20, true, $21
+    $7, $8, $9,
+    $10, $11,
+    $12,
+    $13, $14, true, $15
 )
 ON CONFLICT (apim_api_id, method, gateway_path) DO UPDATE SET
     apim_api_name           = EXCLUDED.apim_api_name,
@@ -102,16 +91,10 @@ ON CONFLICT (apim_api_id, method, gateway_path) DO UPDATE SET
     apim_api_context        = EXCLUDED.apim_api_context,
     apim_api_provider       = EXCLUDED.apim_api_provider,
     apim_lifecycle_status   = EXCLUDED.apim_lifecycle_status,
-    env_kind                = EXCLUDED.env_kind,
-    service_identity        = EXCLUDED.service_identity,
-    operation_target        = EXCLUDED.operation_target,
-    raw_operation_target    = EXCLUDED.raw_operation_target,
-    raw_placeholders        = EXCLUDED.raw_placeholders,
+    backend_path            = EXCLUDED.backend_path,
     auth_type               = EXCLUDED.auth_type,
     throttling_policy       = EXCLUDED.throttling_policy,
     backend_url             = EXCLUDED.backend_url,
-    backend_resolved_ip     = EXCLUDED.backend_resolved_ip,
-    backend_resolved_port   = EXCLUDED.backend_resolved_port,
     apim_updated_time       = EXCLUDED.apim_updated_time,
     last_synced_at          = EXCLUDED.last_synced_at,
     is_active               = true,
@@ -125,16 +108,12 @@ func (r *ManagedRepo) upsertAll(ctx context.Context, tx pgx.Tx, items []ManagedS
 	}
 	batch := &pgx.Batch{}
 	for _, x := range items {
-		// Postgres columns raw_placeholders + warnings are NOT NULL with
-		// DEFAULT '{}'. pgx encodes a nil Go slice as NULL, which would
-		// violate the constraint, so coerce to empty slice here.
 		batch.Queue(managedUpsertSQL,
 			x.APIMAPIID, x.APIMAPIName, x.APIMAPIVersion, x.APIMAPIContext,
 			x.APIMAPIProvider, x.APIMLifecycleStatus,
-			x.EnvKind, x.ServiceIdentity,
-			x.Method, x.GatewayPath, x.OperationTarget, x.RawOperationTarget,
-			nilToEmpty(x.RawPlaceholders), x.AuthType, x.ThrottlingPolicy,
-			x.BackendURL, x.BackendResolvedIP, x.BackendResolvedPort,
+			x.Method, x.GatewayPath, x.BackendPath,
+			x.AuthType, x.ThrottlingPolicy,
+			x.BackendURL,
 			x.APIMUpdatedTime, syncStartedAt, nilToEmpty(x.Warnings),
 		)
 	}
