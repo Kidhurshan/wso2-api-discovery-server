@@ -1,0 +1,55 @@
+# Bundled stack — Postgres + ADS in a single `docker compose up`.
+#
+# Quick start:
+#
+#   cp deploy/docker/.env.example deploy/docker/.env
+#   # edit .env: APIM creds, DeepFlow URL, generated DB password
+#   docker compose -f deploy/docker/docker-compose.yml up -d
+#
+# Postgres data persists in a named volume (pgdata). The Postgres port is
+# bound to 127.0.0.1 only so it isn't reachable outside the host. ADS BFF
+# listens on host port 8443; health probe on 9090.
+#
+# To use an external Postgres instead, see docker-compose.external.yml.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ads-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ads
+      POSTGRES_DB: ads
+      POSTGRES_PASSWORD: ${ADS_DB_PASSWORD:?ADS_DB_PASSWORD must be set in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ads -d ads"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  ads:
+    image: ${ADS_IMAGE:-ghcr.io/Kidhurshan/wso2-api-discovery-server:1.0.0}
+    container_name: ads
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ADS_DB_PASSWORD: ${ADS_DB_PASSWORD}
+      APIM_SVC_PASSWORD: ${APIM_SVC_PASSWORD:?APIM_SVC_PASSWORD must be set in .env}
+      APIM_INTROSPECT_BASIC_AUTH: ${APIM_INTROSPECT_BASIC_AUTH:?APIM_INTROSPECT_BASIC_AUTH must be set in .env}
+      ADS_BFF_BEARER_TOKEN: ${ADS_BFF_BEARER_TOKEN:-}
+    ports:
+      - "${ADS_BFF_HOST_PORT:-8443}:8443"
+      - "${ADS_HEALTH_HOST_PORT:-9090}:9090"
+    volumes:
+      - ./config.toml:/etc/ads/config.toml:ro
+      - ./certs:/etc/ads/certs:ro
+
+volumes:
+  pgdata:
+    driver: local

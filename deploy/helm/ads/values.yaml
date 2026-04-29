@@ -1,4 +1,17 @@
-# Default values for the ads chart. Override with -f values-prod.yaml.
+# Default values for the ads chart.
+#
+# Two install modes:
+#
+#   1. Bundled (default) — postgresql.enabled = true. The chart pulls in
+#      Bitnami's postgresql subchart and provisions a single-replica
+#      Postgres alongside ADS. One-shot install, ideal for demos / small
+#      production / on-prem.
+#
+#   2. External — set postgresql.enabled = false and point database.host
+#      at your existing managed Postgres (RDS, Cloud SQL, in-cluster
+#      Postgres operator). The subchart is skipped entirely.
+#
+# Override with -f values-bundled.yaml or -f values-external.yaml.
 
 image:
   repository: ghcr.io/Kidhurshan/wso2-api-discovery-server
@@ -8,7 +21,6 @@ image:
 namespace: governance
 replicaCount: 2
 
-# Resource limits per pod. Match the spec's deployment.yaml defaults.
 resources:
   requests:
     cpu: 100m
@@ -17,18 +29,55 @@ resources:
     cpu: 500m
     memory: 512Mi
 
-# Database — typically a separate Postgres in the same cluster. The chart
-# does NOT manage Postgres; deploy it separately or use an operator.
+# ---------------------------------------------------------------------------
+# Bundled Postgres (Bitnami subchart). Disable to use an external Postgres.
+# ---------------------------------------------------------------------------
+postgresql:
+  enabled: true
+  auth:
+    username: ads
+    database: ads
+    # Leave existingSecret empty to let Bitnami auto-generate a password
+    # into <release>-postgresql secret. Operators who want a stable known
+    # password should pre-create a secret and set existingSecret here.
+    existingSecret: ""
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+      # storageClass: ""   # uncomment + set if cluster has no default
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+  # Lock down: only ADS pods in the same namespace should reach Postgres.
+  # The Bitnami chart exposes a ClusterIP service named <release>-postgresql
+  # on port 5432; no NodePort, no LoadBalancer.
+  service:
+    type: ClusterIP
+
+# ---------------------------------------------------------------------------
+# Database wiring. When postgresql.enabled = true, host/port/user/name are
+# resolved from the subchart and these values are ignored. When disabled,
+# operators MUST populate host/port and either passwordSecret or set
+# ADS_DB_PASSWORD via the ads-secrets Secret.
+# ---------------------------------------------------------------------------
 database:
-  host: postgres.governance.svc.cluster.local
+  host: ""             # external mode: e.g. postgres.prod.svc.cluster.local
   port: 5432
   name: ads
   user: ads
-  sslmode: require
+  sslmode: disable     # external mode: typically "require" or "verify-full"
+  # Reference an existing Secret (key = "password") instead of putting the
+  # password in the auto-generated ads-secrets. Useful with external-secrets
+  # / SealedSecrets / Vault.
+  passwordSecret: ""
 
-# DeepFlow — reach via the deepflow-server NodePort (or ClusterIP if same
-# cluster). Spec deviation in project memory: use the querier API, not
-# direct ClickHouse.
+# DeepFlow — reach via the deepflow-server NodePort or ClusterIP. Use the
+# querier API (port 20416), NOT direct ClickHouse.
 deepflow:
   enabled: true
   url: http://deepflow-server.deepflow.svc.cluster.local:20416
@@ -49,12 +98,6 @@ discovery:
 managed:
   pollInterval: 10
   fetchConcurrency: 5
-
-# Topology — operators MUST populate these for the deployment-aware
-# resolver to map APIM backend URLs to service identities.
-topology:
-  k8sNodes: []
-  legacyChosts: []
 
 # Retention.
 retention:

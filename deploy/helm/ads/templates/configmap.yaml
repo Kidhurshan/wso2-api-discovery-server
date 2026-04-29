@@ -13,12 +13,12 @@ data:
     log_level = "info"
 
     [database]
-    host                    = {{ .Values.database.host | quote }}
+    host                    = {{ include "ads.dbHost" . | quote }}
     port                    = {{ .Values.database.port }}
     name                    = {{ .Values.database.name | quote }}
     user                    = {{ .Values.database.user | quote }}
     password                = "${ADS_DB_PASSWORD}"
-    sslmode                 = {{ .Values.database.sslmode | quote }}
+    sslmode                 = {{ if .Values.postgresql.enabled }}"disable"{{ else }}{{ .Values.database.sslmode | quote }}{{ end }}
     max_open_conns          = 25
     max_idle_conns          = 5
     connect_timeout_seconds = 10
@@ -49,54 +49,44 @@ data:
     max_signatures_per_window = 10000
 
     [discovery.noise_filter]
-    path_pattern = "^/(health|healthz|metrics|debug|favicon\\.ico|robots\\.txt|swagger|swagger-ui).*"
-    ports        = [9090, 6443, 10250, 10251, 10252, 2379, 2380]
-    domains      = ["kubernetes.default.svc", "kubernetes.default.svc.cluster.local"]
+    path_patterns = [
+        "/health", "/healthz", "/ping", "/ready", "/readiness",
+        "/liveness", "/actuator",
+        "/agent.Synchronizer", "/grpc.health.v1.HealthService",
+        "/controller.", "/tagrecorder.",
+        "/metadata", "/machine", "/vmSettings", "/vmAgentLog",
+        "/latest/meta-data", "/computeMetadata",
+        "/apis/", "/api/v1/",
+        "/favicon.ico", "/.well-known", "/swagger", "/openapi",
+        "/robots.txt", "/.env",
+    ]
+    path_exact       = ["/", "/version", "/metrics"]
+    excluded_ports   = []
+    excluded_domains = ["169.254.169.254"]
 
-    [discovery.normalization_rules_meta]
-    version = "v1"
-
-    [[discovery.normalization_rules]]
-    name        = "uuid_v4"
-    pattern     = '/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(/|$)'
-    placeholder = '/{id}$1'
-
-    [[discovery.normalization_rules]]
-    name        = "iso_date"
-    pattern     = '/\d{4}-\d{2}-\d{2}(/|$)'
-    placeholder = '/{id}$1'
-
-    [[discovery.normalization_rules]]
-    name        = "mongo_objectid"
-    pattern     = '/[0-9a-f]{24}(/|$)'
-    placeholder = '/{id}$1'
-
-    [[discovery.normalization_rules]]
-    name        = "customer_id"
-    pattern     = '/CUST-[A-Z0-9]+(/|$)'
-    placeholder = '/{id}$1'
-
-    [[discovery.normalization_rules]]
-    name        = "sku_pattern"
-    pattern     = '/[A-Z]{3,}(?:-[A-Z0-9]+)+(/|$)'
-    placeholder = '/{id}$1'
-
-    [[discovery.normalization_rules]]
-    name        = "numeric_id"
-    pattern     = '/[0-9]+(/|$)'
-    placeholder = '/{id}$1'
+    [discovery.normalization]
+    version_pattern = "^v?[0-9]+\\.[0-9]+(\\.[0-9]+)?$"
+    builtin_patterns = [
+        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+        "^[0-9a-fA-F]{24,}$",
+        "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+        "^[0-9]+$",
+        "^[A-Za-z0-9_-]{20,}={0,2}$",
+        "^[A-Z]{2,5}-[A-Z0-9-]{3,}$",
+    ]
+    user_patterns = []
+    exclude_patterns = [
+        "^v?[0-9]+\\.[0-9]+(\\.[0-9]+)?$",
+        "^v[0-9]+$",
+        "^api$",
+    ]
 
     [managed]
     poll_interval_minutes = {{ .Values.managed.pollInterval }}
     fetch_concurrency     = {{ .Values.managed.fetchConcurrency }}
-    dns_cache_ttl_minutes = 5
 
     [comparison]
     freshness_threshold_multiplier = 3
-
-    [deployment.topology]
-    k8s_nodes     = {{ .Values.topology.k8sNodes | toJson }}
-    legacy_chosts = {{ .Values.topology.legacyChosts | toJson }}
 
     [bff]
     listen_addr           = "0.0.0.0:8443"

@@ -38,8 +38,8 @@ spec:
             - name: ADS_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "ads.fullname" . }}-secrets
-                  key: db_password
+                  name: {{ include "ads.dbPasswordSecret" . }}
+                  key: {{ include "ads.dbPasswordKey" . }}
             - name: APIM_SVC_PASSWORD
               valueFrom:
                 secretKeyRef:

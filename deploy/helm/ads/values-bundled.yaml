@@ -1,0 +1,16 @@
+# Bundled-Postgres profile (also the default in values.yaml).
+# Use when you want a one-shot install with no external DB dependency.
+#
+#   helm install ads deploy/helm/ads -n governance --create-namespace
+#
+# Storage: provisions a 10Gi PVC for Postgres data. Make sure your cluster
+# has a default StorageClass, OR uncomment postgresql.primary.persistence.
+# storageClass below.
+
+postgresql:
+  enabled: true
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+      # storageClass: standard

@@ -2,7 +2,7 @@ apiVersion: v2
 name: ads
 description: WSO2 API Discovery Server — discovers unmanaged APIs in runtime traffic and surfaces them in the WSO2 APIM Admin Portal.
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "1.0.0"
 home: https://github.com/Kidhurshan/wso2-api-discovery-server
 sources:
@@ -14,3 +14,8 @@ keywords:
   - api-management
   - api-discovery
   - governance
+dependencies:
+  - name: postgresql
+    version: 16.x.x
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled

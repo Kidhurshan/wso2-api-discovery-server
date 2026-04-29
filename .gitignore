@@ -8,6 +8,14 @@ config/config.toml
 config/config.toml.local
 .env
 .env.local
+deploy/docker/.env
+deploy/docker/config.toml
+deploy/docker/certs/
+
+# Helm subchart download artifacts (Chart.lock IS pushed; charts/ is built
+# locally via `helm dependency update`).
+deploy/helm/*/charts/
+deploy/helm/*/charts/*.tgz
 
 # Test output (keep test/results/ pushed; only local-prefixed scratch is excluded)
 test/results/local-*

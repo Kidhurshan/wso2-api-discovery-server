@@ -1,6 +1,18 @@
-# Prod override placeholder. In real deployments, copy + populate the
-# secrets, topology, and image tag sections.
+# Prod overrides — assumes external managed Postgres + 2 ADS replicas.
+# Copy and customise; do not commit secrets here.
 
 replicaCount: 2
+
 image:
   pullPolicy: Always
+
+postgresql:
+  enabled: false
+
+database:
+  host: postgres.prod.svc.cluster.local
+  port: 5432
+  name: ads
+  user: ads
+  sslmode: verify-full
+  passwordSecret: ads-db-credentials

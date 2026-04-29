@@ -17,3 +17,45 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "ads.fullname" -}}
 {{- printf "%s-%s" .Release.Name .Chart.Name | trunc 63 | trimSuffix "-" }}
 {{- end }}
+
+{{/* DB host — bundled mode resolves to the Bitnami subchart's primary
+     service (<release>-postgresql); external mode uses .Values.database.host. */}}
+{{- define "ads.dbHost" -}}
+{{- if .Values.postgresql.enabled -}}
+{{- printf "%s-postgresql" .Release.Name -}}
+{{- else -}}
+{{- required "database.host is required when postgresql.enabled = false" .Values.database.host -}}
+{{- end -}}
+{{- end }}
+
+{{/* DB password Secret name — bundled mode points at the Bitnami-generated
+     <release>-postgresql secret (key: "password"); external mode uses the
+     operator-supplied passwordSecret OR the ads-secrets Secret rendered
+     by templates/secret.yaml. */}}
+{{- define "ads.dbPasswordSecret" -}}
+{{- if .Values.postgresql.enabled -}}
+{{- if .Values.postgresql.auth.existingSecret -}}
+{{- .Values.postgresql.auth.existingSecret -}}
+{{- else -}}
+{{- printf "%s-postgresql" .Release.Name -}}
+{{- end -}}
+{{- else -}}
+{{- if .Values.database.passwordSecret -}}
+{{- .Values.database.passwordSecret -}}
+{{- else -}}
+{{- printf "%s-secrets" (include "ads.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/* DB password Secret key — Bitnami uses "password"; the ads-managed
+     fallback Secret uses "db_password". */}}
+{{- define "ads.dbPasswordKey" -}}
+{{- if .Values.postgresql.enabled -}}
+password
+{{- else if .Values.database.passwordSecret -}}
+password
+{{- else -}}
+db_password
+{{- end -}}
+{{- end }}

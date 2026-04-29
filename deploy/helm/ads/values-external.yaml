@@ -1,0 +1,19 @@
+# External-Postgres profile.
+# Use when you have an existing managed Postgres (RDS, Cloud SQL, in-cluster
+# operator) and don't want the chart to manage it.
+#
+#   helm install ads deploy/helm/ads -n governance --create-namespace \
+#     -f deploy/helm/ads/values-external.yaml \
+#     --set database.host=postgres.prod.svc.cluster.local \
+#     --set database.passwordSecret=ads-db-credentials
+
+postgresql:
+  enabled: false
+
+database:
+  # host:           required
+  port:             5432
+  name:             ads
+  user:             ads
+  sslmode:          require
+  # passwordSecret: required — Secret with key "password"

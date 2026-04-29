@@ -1,0 +1,21 @@
+# External-Postgres overlay — apply on top of docker-compose.yml to
+# remove the bundled postgres service and point ADS at an existing DB.
+#
+#   docker compose \
+#     -f deploy/docker/docker-compose.yml \
+#     -f deploy/docker/docker-compose.external.yml \
+#     up -d
+#
+# Required in .env:
+#   ADS_DB_HOST=postgres.example.internal
+#   ADS_DB_PORT=5432
+#   ADS_DB_PASSWORD=<from your secret store>
+
+services:
+  postgres: !reset null
+
+  ads:
+    depends_on: !reset null
+    environment:
+      ADS_DB_HOST: ${ADS_DB_HOST:?ADS_DB_HOST must be set in .env}
+      ADS_DB_PORT: ${ADS_DB_PORT:-5432}
